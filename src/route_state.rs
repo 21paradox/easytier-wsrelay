@@ -90,8 +90,8 @@ impl RouteState {
             my_info.cost = 1;
             my_info.version = 1;
             my_info.network_length = 24;
-            my_info.easytier_version = "cf-ws-relay".to_string();
-            my_info.hostname = Some("cf-ws-relay".to_string());
+            my_info.easytier_version = "cf-easytier-wsrelay".to_string();
+            my_info.hostname = Some("cf-easytier-wsrelay".to_string());
             my_info.peer_route_id = Self::random_u64();
             my_info.feature_flag = Some(crate::proto::common::PeerFeatureFlag {
                 is_public_server: true,
@@ -505,7 +505,7 @@ fn make_stub_peer_info(peer_id: PeerId, network_length: u32) -> RoutePeerInfo {
         }),
         cost: 1,
         hostname: None,
-        easytier_version: "cf-ws-relay".to_string(),
+        easytier_version: "cf-2.6".to_string(),
         feature_flag: None,
         network_length,
         peer_route_id: 0,

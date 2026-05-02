@@ -22,7 +22,17 @@ pub fn handle_handshake(
     payload: &[u8],
     network_digest_registry: &mut std::collections::HashMap<String, String>,
 ) -> Option<HandshakeOutcome> {
-    let req = codec::decode_handshake_request(payload).ok()?;
+    web_sys::console::log_1(&format!("[HS] handle_handshake payload_len={}", payload.len()).into());
+    let req = match codec::decode_handshake_request(payload) {
+        Ok(r) => {
+            web_sys::console::log_1(&format!("[HS] decoded: magic={} peer_id={} network_name={}", r.magic, r.my_peer_id, r.network_name).into());
+            r
+        }
+        Err(e) => {
+            web_sys::console::error_1(&format!("[HS] decode_handshake_request failed: {}", e).into());
+            return None;
+        }
+    };
 
     if req.magic != MAGIC {
         web_sys::console::error_1(&"Invalid magic".into());

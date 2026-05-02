@@ -15,19 +15,34 @@ use crate::proto::peer_rpc::SyncRouteInfoResponse;
 pub enum RpcAction {
     /// Send bytes to a specific peer.
     SendTo { peer_id: u32, bytes: Vec<u8> },
+    /// Push a full route update to a specific peer (after handling SyncRouteInfo).
+    PushRouteUpdate { peer_id: u32, group_key: String },
     /// No action needed.
     None,
 }
 
 /// Handle an incoming RPC request.
 /// Routes to PeerCenterRpc or OspfRouteRpc based on the descriptor.
+/// Returns a list of actions to take (may be empty).
 pub fn handle_rpc_req(
     ctx: &mut WsPeerContext,
     peer_manager: &mut PeerManager,
     peer_center_map: &mut std::collections::HashMap<String, PeerCenter>,
     payload: &[u8],
-) -> Option<RpcAction> {
-    let rpc_packet = codec::decode_rpc_packet(payload).ok()?;
+) -> Vec<RpcAction> {
+    web_sys::console::log_1(&format!("[RPC] handle_rpc_req payload_len={} peer_id={} group_key={}", payload.len(), ctx.peer_id, ctx.group_key).into());
+    let rpc_packet = match codec::decode_rpc_packet(payload) {
+        Ok(p) => p,
+        Err(e) => {
+            web_sys::console::error_1(&format!("[RPC] decode_rpc_packet failed: {}", e).into());
+            return vec![];
+        }
+    };
+    web_sys::console::log_1(&format!("[RPC] decoded rpc_packet: is_request={} service={:?} method={:?}",
+        rpc_packet.is_request,
+        rpc_packet.descriptor.as_ref().map(|d| d.service_name.as_str()),
+        rpc_packet.descriptor.as_ref().map(|d| d.method_index),
+    ).into());
 
     // Decompress body if needed
     let mut rpc_body = rpc_packet.body.clone();
@@ -58,6 +73,7 @@ pub fn handle_rpc_req(
             .or_insert_with(PeerCenter::new);
 
         let method_index = descriptor.map(|d| d.method_index).unwrap_or(0);
+        web_sys::console::log_1(&format!("[RPC] PeerCenterRpc method_index={}", method_index).into());
 
         if method_index == 0 {
             // report_peers
@@ -68,14 +84,14 @@ pub fn handle_rpc_req(
                         &resp_bytes,
                         ctx.peer_id,
                     );
-                    return Some(RpcAction::SendTo {
+                    return vec![RpcAction::SendTo {
                         peer_id: ctx.peer_id,
                         bytes: send_bytes,
-                    });
+                    }];
                 }
                 Err(e) => {
                     web_sys::console::error_1(&format!("PeerCenter report_peers failed: {}", e).into());
-                    return None;
+                    return vec![];
                 }
             }
         }
@@ -89,16 +105,16 @@ pub fn handle_rpc_req(
                         &resp_bytes,
                         ctx.peer_id,
                     );
-                    return Some(RpcAction::SendTo {
+                    return vec![RpcAction::SendTo {
                         peer_id: ctx.peer_id,
                         bytes: send_bytes,
-                    });
+                    }];
                 }
                 Err(e) => {
                     web_sys::console::error_1(
                         &format!("PeerCenter get_global_peer_map failed: {}", e).into(),
                     );
-                    return None;
+                    return vec![];
                 }
             }
         }
@@ -106,13 +122,14 @@ pub fn handle_rpc_req(
         web_sys::console::log_1(
             &format!("Unhandled PeerCenterRpc methodIndex={}", method_index).into(),
         );
-        return None;
+        return vec![];
     }
 
     // --- OspfRouteRpc ---
     if service_name == "peer_rpc.OspfRouteRpc" || service_name == "OspfRouteRpc" {
         let group_key = ctx.group_key.clone();
         let method_index = descriptor.map(|d| d.method_index).unwrap_or(0);
+        web_sys::console::log_1(&format!("[RPC] OspfRouteRpc method_index={} group_key={}", method_index, group_key).into());
 
         if method_index == 0 || method_index == 1 {
             return handle_sync_route_info(
@@ -127,7 +144,7 @@ pub fn handle_rpc_req(
         web_sys::console::log_1(
             &format!("Unhandled OspfRouteRpc methodIndex={}", method_index).into(),
         );
-        return None;
+        return vec![];
     }
 
     web_sys::console::log_1(
@@ -136,7 +153,7 @@ pub fn handle_rpc_req(
             descriptor.map(|d| d.proto_name.as_str()).unwrap_or("")
         ).into(),
     );
-    None
+    vec![]
 }
 
 /// Handle an incoming RPC response.
@@ -202,7 +219,8 @@ fn handle_sync_route_info(
     rpc_packet: &RpcPacket,
     inner_req_body: &[u8],
     group_key: &str,
-) -> Option<RpcAction> {
+) -> Vec<RpcAction> {
+    web_sys::console::log_1(&format!("[RPC] handle_sync_route_info group_key={} peer_id={} body_len={}", group_key, ctx.peer_id, inner_req_body.len()).into());
     // Ensure server session ID
     if ctx.server_session_id.is_empty() {
         ctx.server_session_id = random_u64_string();
@@ -210,6 +228,7 @@ fn handle_sync_route_info(
 
     // Decode SyncRouteInfoRequest to check initiator flag
     if let Ok(sync_req) = codec::decode_sync_route_info_request(inner_req_body) {
+        web_sys::console::log_1(&format!("[RPC] SyncRouteInfoRequest decoded: is_initiator={} my_session_id={}", sync_req.is_initiator, sync_req.my_session_id).into());
         ctx.we_are_initiator = !sync_req.is_initiator;
 
         // Ack the session
@@ -226,6 +245,8 @@ fn handle_sync_route_info(
             ctx.peer_id,
             inner_req_body,
         );
+    } else {
+        web_sys::console::warn_1(&format!("[RPC] decode_sync_route_info_request FAILED for inner_req_body len={}", inner_req_body.len()).into());
     }
 
     // Generate response
@@ -234,17 +255,22 @@ fn handle_sync_route_info(
         ctx.peer_id,
         inner_req_body,
     );
+    web_sys::console::log_1(&format!("[RPC] handle_sync_route_info_request returned resp={}", resp_bytes.is_some()).into());
 
     // Build RPC response and send
     if let Some(resp) = resp_bytes {
         let send_bytes = build_rpc_response_bytes(rpc_packet, &resp, ctx.peer_id);
-        return Some(RpcAction::SendTo {
+        web_sys::console::log_1(&format!("[RPC] Sending RpcResp len={} to peer={}", send_bytes.len(), ctx.peer_id).into());
+        return vec![RpcAction::SendTo {
             peer_id: ctx.peer_id,
             bytes: send_bytes,
-        });
+        }, RpcAction::PushRouteUpdate {
+            peer_id: ctx.peer_id,
+            group_key: group_key.to_string(),
+        }];
     }
 
-    None
+    vec![]
 }
 
 /// Build a full RPC response packet (without outer packet header wrapping).

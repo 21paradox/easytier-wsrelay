@@ -9,7 +9,7 @@ use crate::compress;
 use crate::constants::{PacketType, HEADER_SIZE, MY_PEER_ID};
 use crate::crypto::{random_u64_string, wrap_packet, WsCrypto};
 use crate::handlers;
-use crate::packet::parse_header;
+use crate::packet::{parse_header, create_header};
 use crate::peer_center::PeerCenter;
 use crate::peer_manager::{PeerManager, WsPeerContext};
 use crate::rpc_handler::{self, RpcAction};
@@ -238,8 +238,22 @@ impl DurableObject for RelayRoom {
                         }
                     }
 
-                    // Push initial route update to the new peer (after a short delay via alarm)
-                    // This is handled by the client's next route sync request.
+                    // Push initial route update to the new peer (matching JS version's setTimeout behavior)
+                    {
+                        let ctx = attachment_to_ctx(&att);
+                        let route_update = {
+                            let mut pm = self.peer_manager.borrow_mut();
+                            pm.build_route_update(&ctx, att.peer_id, true)
+                        };
+                        if let Some(rpc_bytes) = route_update {
+                            web_sys::console::log_1(&format!("[ws] HandShake -> pushing initial route update to peer={}", att.peer_id).into());
+                            let crypto = WsCrypto::default();
+                            match wrap_packet(MY_PEER_ID, att.peer_id, PacketType::RpcReq, &rpc_bytes, &crypto).await {
+                                Ok(packet) => { ws.send_with_bytes(&packet)?; }
+                                Err(e) => { web_sys::console::error_1(&format!("initial route update wrap_packet failed: {}", e).into()); }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -252,7 +266,7 @@ impl DurableObject for RelayRoom {
                 if header.to_peer_id == 0 || header.to_peer_id == MY_PEER_ID {
                     // Handle locally
                     let ctx = attachment_to_ctx(&att);
-                    let action = {
+                    let actions = {
                         let mut ctx_mut = ctx.clone();
                         let mut pm = self.peer_manager.borrow_mut();
                         let mut pcm = self.peer_center_map.borrow_mut();
@@ -264,11 +278,37 @@ impl DurableObject for RelayRoom {
                         )
                     };
 
-                    if let Some(RpcAction::SendTo { peer_id: _, bytes }) = action {
-                        let crypto = WsCrypto::default();
-                        match wrap_packet(MY_PEER_ID, att.peer_id, PacketType::RpcResp, &bytes, &crypto).await {
-                            Ok(packet) => { ws.send_with_bytes(&packet)?; }
-                            Err(e) => { web_sys::console::error_1(&format!("wrap_packet failed: {}", e).into()); }
+                    if actions.is_empty() {
+                        web_sys::console::warn_1(&format!("[ws] RpcReq -> handle_rpc_req returned no action (peer_id={} group_key={})", att.peer_id, att.group_key).into());
+                    }
+
+                    for action in actions {
+                        match action {
+                            RpcAction::SendTo { peer_id: _, bytes } => {
+                                web_sys::console::log_1(&format!("[ws] RpcReq -> sending RpcResp len={}", bytes.len()).into());
+                                let crypto = WsCrypto::default();
+                                match wrap_packet(MY_PEER_ID, att.peer_id, PacketType::RpcResp, &bytes, &crypto).await {
+                                    Ok(packet) => { ws.send_with_bytes(&packet)?; }
+                                    Err(e) => { web_sys::console::error_1(&format!("wrap_packet failed: {}", e).into()); }
+                                }
+                            }
+                            RpcAction::PushRouteUpdate { peer_id, group_key } => {
+                                web_sys::console::log_1(&format!("[ws] RpcReq -> pushing route update to peer={}", peer_id).into());
+                                // Build and send a route update to this peer
+                                let route_update = {
+                                    let mut pm = self.peer_manager.borrow_mut();
+                                    let ctx = attachment_to_ctx(&att);
+                                    pm.build_route_update(&ctx, peer_id, true)
+                                };
+                                if let Some(rpc_bytes) = route_update {
+                                    let crypto = WsCrypto::default();
+                                    match wrap_packet(MY_PEER_ID, peer_id, PacketType::RpcReq, &rpc_bytes, &crypto).await {
+                                        Ok(packet) => { ws.send_with_bytes(&packet)?; }
+                                        Err(e) => { web_sys::console::error_1(&format!("pushRouteUpdate wrap_packet failed: {}", e).into()); }
+                                    }
+                                }
+                            }
+                            _ => {}
                         }
                     }
                 } else {
@@ -394,21 +434,15 @@ impl RelayRoom {
                 };
 
                 if let Some(rpc_bytes) = route_update {
-                    let ws_clone = ws.clone();
-                    let peer_id = att.peer_id;
-                    wasm_bindgen_futures::spawn_local(async move {
-                        let crypto = WsCrypto::default();
-                        match wrap_packet(MY_PEER_ID, peer_id, PacketType::RpcReq, &rpc_bytes, &crypto).await {
-                            Ok(packet) => {
-                                let _ = ws_clone.send_with_bytes(&packet);
-                            }
-                            Err(e) => {
-                                web_sys::console::error_1(
-                                    &format!("broadcastRouteUpdate wrap_packet failed: {}", e).into(),
-                                );
-                            }
-                        }
-                    });
+                    // Send directly without spawn_local (crypto is always disabled)
+                    let header = create_header(MY_PEER_ID, att.peer_id, PacketType::RpcReq, rpc_bytes.len() as u32);
+                    let mut packet = header;
+                    packet.extend_from_slice(&rpc_bytes);
+                    if let Err(e) = ws.send_with_bytes(&packet) {
+                        web_sys::console::error_1(
+                            &format!("broadcastRouteUpdate send failed: {:?}", e).into(),
+                        );
+                    }
                 }
             }
         }
