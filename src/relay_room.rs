@@ -26,6 +26,9 @@ struct WsAttachment {
     server_session_id: String,
     #[serde(default)]
     we_are_initiator: bool,
+    /// Last time (in millis since epoch) any message was received on this socket.
+    #[serde(default)]
+    last_seen_ms: i64,
 }
 
 /// Convert attachment to WsPeerContext.
@@ -101,6 +104,7 @@ impl DurableObject for RelayRoom {
             domain_name: String::new(),
             server_session_id: random_u64_string(),
             we_are_initiator: false,
+            last_seen_ms: Date::now().as_millis() as i64,
         };
         server.serialize_attachment(&att)?;
 
@@ -116,17 +120,30 @@ impl DurableObject for RelayRoom {
     }
 
     async fn alarm(&self) -> Result<Response> {
-        let now = Date::now().as_millis();
+        let now = Date::now().as_millis() as i64;
 
         let sockets = self.state.get_websockets();
         let mut alive_count = 0;
 
         for ws in &sockets {
-            // Check attachment last_seen via deserialization
-            // Since we don't have a direct last_seen field on the attachment,
-            // we'll rely on the WebSocket state instead.
-            // The WebSocket Hibernation API automatically closes dead sockets,
-            // so just check which are still open.
+            match ws.deserialize_attachment::<WsAttachment>() {
+                Ok(Some(att)) if att.last_seen_ms > 0 => {
+                    let elapsed = now.saturating_sub(att.last_seen_ms);
+                    if elapsed as u64 > SOCKET_TIMEOUT_MS {
+                        web_sys::console::warn_1(
+                            &format!(
+                                "[cleanup] closing dead socket peer_id={} last_seen_ago={}ms",
+                                att.peer_id, elapsed
+                            )
+                            .into(),
+                        );
+                        // Close the timed-out socket; this triggers websocket_close
+                        let _ = ws.close(Some(1001), Some("timeout"));
+                        continue;
+                    }
+                }
+                _ => {}
+            }
             alive_count += 1;
         }
 
@@ -181,6 +198,9 @@ impl DurableObject for RelayRoom {
 
         // Get current attachment
         let mut att: WsAttachment = ws.deserialize_attachment()?.unwrap_or_default();
+
+        // Update last_seen on every message to track socket liveness
+        att.last_seen_ms = Date::now().as_millis() as i64;
 
         match packet_type {
             PacketType::HandShake => {
@@ -254,6 +274,10 @@ impl DurableObject for RelayRoom {
                             }
                         }
                     }
+                } else {
+                    // Handshake failed (invalid magic or digest mismatch) — close the connection
+                    web_sys::console::warn_1(&format!("[ws] HandShake failed for peer, closing connection").into());
+                    let _ = ws.close(Some(1001), Some("handshake failed"));
                 }
             }
 
