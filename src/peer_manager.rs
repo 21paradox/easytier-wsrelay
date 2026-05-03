@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 use prost::Message;
@@ -5,6 +6,7 @@ use prost::Message;
 use crate::codec;
 use crate::constants::MY_PEER_ID;
 use crate::crypto::random_u64_string;
+use crate::peer_center::PeerCenter;
 use crate::proto::common::{RpcDescriptor, RpcPacket, RpcRequest};
 use crate::proto::peer_rpc::SyncRouteInfoRequest;
 use crate::route_state::RouteState;
@@ -35,15 +37,12 @@ impl Default for WsPeerContext {
 /// PeerManager wraps RouteState and provides methods to build RPC messages.
 pub struct PeerManager {
     pub route_state: RouteState,
-    /// Registry of network_name -> digest_hex for handshake validation.
-    pub network_digest_registry: HashMap<String, String>,
 }
 
 impl PeerManager {
     pub fn new() -> Self {
         PeerManager {
             route_state: RouteState::new(),
-            network_digest_registry: HashMap::new(),
         }
     }
 
@@ -198,4 +197,38 @@ impl PeerManager {
 
         Ok(has_new)
     }
+}
+
+// ── Global singleton that survives DO hibernation via WASM linear memory ──
+
+/// All DO-level state that must survive hibernation.
+/// Lives in WASM linear memory as a thread_local, analogous to JS module-scope singletons.
+pub(crate) struct GlobalStateInner {
+    pub peer_manager: PeerManager,
+    pub peer_center_map: HashMap<String, PeerCenter>,
+    pub network_digest_registry: HashMap<String, String>,
+}
+
+thread_local! {
+    static GLOBAL_STATE: RefCell<Option<GlobalStateInner>> = RefCell::new(None);
+}
+
+/// Get or initialize the global state, then run the closure with a mutable reference.
+/// On first call (or after isolate restart), state is freshly created.
+/// On DO hibernation wakeup, the existing state survives via WASM memory snapshot.
+pub(crate) fn with_global_state<F, R>(f: F) -> R
+where
+    F: FnOnce(&mut GlobalStateInner) -> R,
+{
+    GLOBAL_STATE.with(|cell| {
+        let mut opt = cell.borrow_mut();
+        if opt.is_none() {
+            *opt = Some(GlobalStateInner {
+                peer_manager: PeerManager::new(),
+                peer_center_map: HashMap::new(),
+                network_digest_registry: HashMap::new(),
+            });
+        }
+        f(opt.as_mut().unwrap())
+    })
 }

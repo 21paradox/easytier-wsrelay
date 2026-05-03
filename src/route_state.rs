@@ -102,7 +102,7 @@ impl RouteState {
                 quic_input: false,
                 no_relay_quic: false,
                 is_credential_peer: false,
-                need_p2p: false,
+                need_p2p: true,
                 disable_p2p: false,
                 ipv6_public_addr_provider: false,
             });

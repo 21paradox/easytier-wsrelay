@@ -1,17 +1,12 @@
-use std::cell::RefCell;
-use std::collections::HashMap;
-
 use serde::{Deserialize, Serialize};
 use worker::*;
 
 use crate::codec;
-use crate::compress;
 use crate::constants::{PacketType, HEADER_SIZE, MY_PEER_ID};
 use crate::crypto::{random_u64_string, wrap_packet, WsCrypto};
 use crate::handlers;
 use crate::packet::{parse_header, create_header};
-use crate::peer_center::PeerCenter;
-use crate::peer_manager::{PeerManager, WsPeerContext};
+use crate::peer_manager::{self, WsPeerContext};
 use crate::rpc_handler::{self, RpcAction};
 
 const CLEANUP_INTERVAL_MS: u64 = 30_000;
@@ -52,33 +47,30 @@ fn attachment_to_ctx(att: &WsAttachment) -> WsPeerContext {
 
 #[durable_object]
 pub struct RelayRoom {
-    peer_manager: RefCell<PeerManager>,
-    peer_center_map: RefCell<HashMap<String, PeerCenter>>,
-    network_digest_registry: RefCell<HashMap<String, String>>,
     state: State,
     env: Env,
 }
 
 impl DurableObject for RelayRoom {
     fn new(state: State, env: Env) -> Self {
-        // Restore socket attachments after hibernation
+        // Ensure peers from existing sockets are tracked in the global state.
+        // - First creation / isolate restart: global PeerManager is fresh, add all peers.
+        // - DO hibernation wakeup: peers already present in global state, this is a no-op.
         let sockets = state.get_websockets();
-        let mut peer_mgr = PeerManager::new();
-        for ws in &sockets {
-            if let Ok(Some(att)) = ws.deserialize_attachment::<WsAttachment>() {
-                if att.peer_id != 0 {
-                    peer_mgr.add_peer(&att.group_key, att.peer_id);
+        peer_manager::with_global_state(|gs| {
+            for ws in &sockets {
+                if let Ok(Some(att)) = ws.deserialize_attachment::<WsAttachment>() {
+                    if att.peer_id != 0 {
+                        let existing = gs.peer_manager.list_peer_ids_in_group(&att.group_key);
+                        if !existing.contains(&att.peer_id) {
+                            gs.peer_manager.add_peer(&att.group_key, att.peer_id);
+                        }
+                    }
                 }
             }
-        }
+        });
 
-        RelayRoom {
-            peer_manager: RefCell::new(peer_mgr),
-            peer_center_map: RefCell::new(HashMap::new()),
-            network_digest_registry: RefCell::new(HashMap::new()),
-            state,
-            env,
-        }
+        RelayRoom { state, env }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
@@ -206,10 +198,12 @@ impl DurableObject for RelayRoom {
             PacketType::HandShake => {
                 web_sys::console::log_1(&format!("[ws] -> handleHandshake").into());
 
-                let outcome = handlers::handle_handshake(
-                    payload,
-                    &mut self.network_digest_registry.borrow_mut(),
-                );
+                let outcome = peer_manager::with_global_state(|gs| {
+                    handlers::handle_handshake(
+                        payload,
+                        &mut gs.network_digest_registry,
+                    )
+                });
 
                 if let Some(outcome) = outcome {
                     // Update attachment
@@ -219,30 +213,31 @@ impl DurableObject for RelayRoom {
                     att.we_are_initiator = false;
                     ws.serialize_attachment(&att)?;
 
-                    // Add peer to manager
-                    self.peer_manager.borrow_mut().add_peer(&outcome.group_key, outcome.peer_id);
+                    // Add peer to manager + update peer info
+                    peer_manager::with_global_state(|gs| {
+                        gs.peer_manager.add_peer(&outcome.group_key, outcome.peer_id);
 
-                    // Update peer info
-                    let peer_info = crate::proto::peer_rpc::RoutePeerInfo {
-                        peer_id: outcome.peer_id,
-                        version: 1,
-                        last_update: Some(crate::proto::Timestamp {
-                            seconds: (Date::now().as_millis() / 1000) as i64,
-                            nanos: 0,
-                        }),
-                        inst_id: Some(crate::proto::common::Uuid {
-                            part1: 0, part2: 0, part3: 0, part4: 0,
-                        }),
-                        network_length: 24,
-                        ..Default::default()
-                    };
-                    let peer_info_bytes = codec::encode_route_peer_info(&peer_info);
-                    self.peer_manager.borrow_mut().update_peer_info(
-                        &outcome.group_key,
-                        outcome.peer_id,
-                        &peer_info_bytes,
-                    );
-                    self.peer_manager.borrow_mut().route_state.bump_my_info_version(&outcome.group_key);
+                        let peer_info = crate::proto::peer_rpc::RoutePeerInfo {
+                            peer_id: outcome.peer_id,
+                            version: 1,
+                            last_update: Some(crate::proto::Timestamp {
+                                seconds: (Date::now().as_millis() / 1000) as i64,
+                                nanos: 0,
+                            }),
+                            inst_id: Some(crate::proto::common::Uuid {
+                                part1: 0, part2: 0, part3: 0, part4: 0,
+                            }),
+                            network_length: 24,
+                            ..Default::default()
+                        };
+                        let peer_info_bytes = codec::encode_route_peer_info(&peer_info);
+                        gs.peer_manager.update_peer_info(
+                            &outcome.group_key,
+                            outcome.peer_id,
+                            &peer_info_bytes,
+                        );
+                        gs.peer_manager.route_state.bump_my_info_version(&outcome.group_key);
+                    });
 
                     // Send handshake response
                     ws.send_with_bytes(&outcome.response_bytes)?;
@@ -258,13 +253,12 @@ impl DurableObject for RelayRoom {
                         }
                     }
 
-                    // Push initial route update to the new peer (matching JS version's setTimeout behavior)
+                    // Push initial route update to the new peer
                     {
                         let ctx = attachment_to_ctx(&att);
-                        let route_update = {
-                            let mut pm = self.peer_manager.borrow_mut();
-                            pm.build_route_update(&ctx, att.peer_id, true)
-                        };
+                        let route_update = peer_manager::with_global_state(|gs| {
+                            gs.peer_manager.build_route_update(&ctx, att.peer_id, true)
+                        });
                         if let Some(rpc_bytes) = route_update {
                             web_sys::console::log_1(&format!("[ws] HandShake -> pushing initial route update to peer={}", att.peer_id).into());
                             let crypto = WsCrypto::default();
@@ -290,17 +284,15 @@ impl DurableObject for RelayRoom {
                 if header.to_peer_id == 0 || header.to_peer_id == MY_PEER_ID {
                     // Handle locally
                     let ctx = attachment_to_ctx(&att);
-                    let actions = {
+                    let actions = peer_manager::with_global_state(|gs| {
                         let mut ctx_mut = ctx.clone();
-                        let mut pm = self.peer_manager.borrow_mut();
-                        let mut pcm = self.peer_center_map.borrow_mut();
                         rpc_handler::handle_rpc_req(
                             &mut ctx_mut,
-                            &mut pm,
-                            &mut pcm,
+                            &mut gs.peer_manager,
+                            &mut gs.peer_center_map,
                             payload,
                         )
-                    };
+                    });
 
                     if actions.is_empty() {
                         web_sys::console::warn_1(&format!("[ws] RpcReq -> handle_rpc_req returned no action (peer_id={} group_key={})", att.peer_id, att.group_key).into());
@@ -316,14 +308,12 @@ impl DurableObject for RelayRoom {
                                     Err(e) => { web_sys::console::error_1(&format!("wrap_packet failed: {}", e).into()); }
                                 }
                             }
-                            RpcAction::PushRouteUpdate { peer_id, group_key } => {
+                            RpcAction::PushRouteUpdate { peer_id, group_key: _ } => {
                                 web_sys::console::log_1(&format!("[ws] RpcReq -> pushing route update to peer={}", peer_id).into());
-                                // Build and send a route update to this peer
-                                let route_update = {
-                                    let mut pm = self.peer_manager.borrow_mut();
+                                let route_update = peer_manager::with_global_state(|gs| {
                                     let ctx = attachment_to_ctx(&att);
-                                    pm.build_route_update(&ctx, peer_id, true)
-                                };
+                                    gs.peer_manager.build_route_update(&ctx, peer_id, true)
+                                });
                                 if let Some(rpc_bytes) = route_update {
                                     let crypto = WsCrypto::default();
                                     match wrap_packet(MY_PEER_ID, peer_id, PacketType::RpcReq, &rpc_bytes, &crypto).await {
@@ -346,13 +336,14 @@ impl DurableObject for RelayRoom {
                     // Handle locally
                     let ctx = attachment_to_ctx(&att);
                     let mut ctx_mut = ctx.clone();
-                    let mut pm = self.peer_manager.borrow_mut();
-                    let _action = rpc_handler::handle_rpc_resp(
-                        &mut ctx_mut,
-                        &mut pm,
-                        header.from_peer_id,
-                        payload,
-                    );
+                    let _action = peer_manager::with_global_state(|gs| {
+                        rpc_handler::handle_rpc_resp(
+                            &mut ctx_mut,
+                            &mut gs.peer_manager,
+                            header.from_peer_id,
+                            payload,
+                        )
+                    });
                 } else {
                     // Forward
                     self.forward_message(&ws, &header, &bytes, &att)?;
@@ -380,7 +371,9 @@ impl DurableObject for RelayRoom {
         if let Ok(Some(att)) = ws.deserialize_attachment::<WsAttachment>() {
             if att.peer_id != 0 {
                 let ctx = attachment_to_ctx(&att);
-                self.peer_manager.borrow_mut().remove_peer(&ctx);
+                peer_manager::with_global_state(|gs| {
+                    gs.peer_manager.remove_peer(&ctx);
+                });
                 self.broadcast_route_update(&att.group_key, att.peer_id)?;
             }
         }
@@ -392,7 +385,9 @@ impl DurableObject for RelayRoom {
         if let Ok(Some(att)) = ws.deserialize_attachment::<WsAttachment>() {
             if att.peer_id != 0 {
                 let ctx = attachment_to_ctx(&att);
-                self.peer_manager.borrow_mut().remove_peer(&ctx);
+                peer_manager::with_global_state(|gs| {
+                    gs.peer_manager.remove_peer(&ctx);
+                });
                 self.broadcast_route_update(&att.group_key, att.peer_id)?;
             }
         }
@@ -452,13 +447,11 @@ impl RelayRoom {
                 }
 
                 let ctx = attachment_to_ctx(&att);
-                let route_update = {
-                    let mut pm = self.peer_manager.borrow_mut();
-                    pm.build_route_update(&ctx, att.peer_id, true)
-                };
+                let route_update = peer_manager::with_global_state(|gs| {
+                    gs.peer_manager.build_route_update(&ctx, att.peer_id, true)
+                });
 
                 if let Some(rpc_bytes) = route_update {
-                    // Send directly without spawn_local (crypto is always disabled)
                     let header = create_header(MY_PEER_ID, att.peer_id, PacketType::RpcReq, rpc_bytes.len() as u32);
                     let mut packet = header;
                     packet.extend_from_slice(&rpc_bytes);
