@@ -17,6 +17,8 @@ pub enum RpcAction {
     SendTo { peer_id: u32, bytes: Vec<u8> },
     /// Push a full route update to a specific peer (after handling SyncRouteInfo).
     PushRouteUpdate { peer_id: u32, group_key: String },
+    /// Broadcast route update to all peers in the group (except excluded).
+    BroadcastRouteUpdate { group_key: String, exclude_peer_id: u32 },
     /// No action needed.
     None,
 }
@@ -226,6 +228,8 @@ fn handle_sync_route_info(
         ctx.server_session_id = random_u64_string();
     }
 
+    let mut p2p_changed = false;
+
     // Decode SyncRouteInfoRequest to check initiator flag
     if let Ok(sync_req) = codec::decode_sync_route_info_request(inner_req_body) {
         web_sys::console::log_1(&format!("[RPC] SyncRouteInfoRequest decoded: is_initiator={} my_session_id={}", sync_req.is_initiator, sync_req.my_session_id).into());
@@ -240,11 +244,23 @@ fn handle_sync_route_info(
         );
 
         // Process incoming peer infos
-        let _ = peer_manager.process_incoming_peer_infos(
+        let has_new_peers = peer_manager.process_incoming_peer_infos(
+            group_key,
+            ctx.peer_id,
+            inner_req_body,
+        ).unwrap_or(false);
+
+        // Also process conn_info so P2P edges are propagated to other peers
+        p2p_changed = peer_manager.process_incoming_conn_info(
             group_key,
             ctx.peer_id,
             inner_req_body,
         );
+
+        // If new peers were discovered from this sync, also broadcast to all peers
+        if has_new_peers && !p2p_changed {
+            p2p_changed = true;
+        }
     } else {
         web_sys::console::warn_1(&format!("[RPC] decode_sync_route_info_request FAILED for inner_req_body len={}", inner_req_body.len()).into());
     }
@@ -261,13 +277,31 @@ fn handle_sync_route_info(
     if let Some(resp) = resp_bytes {
         let send_bytes = build_rpc_response_bytes(rpc_packet, &resp, ctx.peer_id);
         web_sys::console::log_1(&format!("[RPC] Sending RpcResp len={} to peer={}", send_bytes.len(), ctx.peer_id).into());
-        return vec![RpcAction::SendTo {
-            peer_id: ctx.peer_id,
-            bytes: send_bytes,
-        }, RpcAction::PushRouteUpdate {
-            peer_id: ctx.peer_id,
-            group_key: group_key.to_string(),
-        }];
+
+        let mut actions = vec![
+            RpcAction::SendTo {
+                peer_id: ctx.peer_id,
+                bytes: send_bytes,
+            },
+            RpcAction::PushRouteUpdate {
+                peer_id: ctx.peer_id,
+                group_key: group_key.to_string(),
+            },
+        ];
+
+        // When P2P connections change, broadcast to all other peers so they
+        // learn about the new direct edges.
+        if p2p_changed {
+            web_sys::console::log_1(
+                &format!("[P2P] p2p_changed=true, adding BroadcastRouteUpdate for group={} exclude={}", group_key, ctx.peer_id).into(),
+            );
+            actions.push(RpcAction::BroadcastRouteUpdate {
+                group_key: group_key.to_string(),
+                exclude_peer_id: ctx.peer_id,
+            });
+        }
+
+        return actions;
     }
 
     vec![]

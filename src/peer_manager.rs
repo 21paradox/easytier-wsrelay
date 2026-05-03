@@ -162,6 +162,20 @@ impl PeerManager {
             .ok()
     }
 
+    /// Process conn_info from an incoming SyncRouteInfo request.
+    /// Updates the route_state's peer_connections map so P2P edges
+    /// can be included in future conn_bitmap broadcasts.
+    /// Returns true if P2P connections were added/removed.
+    pub fn process_incoming_conn_info(
+        &mut self,
+        group_key: &str,
+        from_peer_id: u32,
+        request_bytes: &[u8],
+    ) -> bool {
+        self.route_state
+            .update_peer_connections_from_conn_info(group_key, from_peer_id, request_bytes)
+    }
+
     /// Process peer infos from an incoming SyncRouteInfo request.
     /// Updates local peer info store and returns whether new peers were discovered.
     pub fn process_incoming_peer_infos(

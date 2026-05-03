@@ -322,6 +322,12 @@ impl DurableObject for RelayRoom {
                                     }
                                 }
                             }
+                            RpcAction::BroadcastRouteUpdate { group_key, exclude_peer_id } => {
+                                web_sys::console::log_1(&format!("[ws] RpcReq -> broadcasting route update to group={} exclude={}", group_key, exclude_peer_id).into());
+                                if let Err(e) = self.broadcast_route_update(&group_key, exclude_peer_id) {
+                                    web_sys::console::error_1(&format!("broadcastRouteUpdate failed: {:?}", e).into());
+                                }
+                            }
                             _ => {}
                         }
                     }

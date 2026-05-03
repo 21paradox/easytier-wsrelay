@@ -4,8 +4,8 @@ use prost::Message;
 
 use crate::proto::peer_rpc::{
     route_foreign_network_infos, ForeignNetworkRouteInfoEntry, ForeignNetworkRouteInfoKey,
-    PeerIdVersion, RouteConnBitmap, RouteForeignNetworkInfos, RoutePeerInfo, RoutePeerInfos,
-    SyncRouteInfoRequest, SyncRouteInfoResponse,
+    PeerIdVersion, RouteConnBitmap, RouteForeignNetworkInfos, RoutePeerInfo,
+    RoutePeerInfos, SyncRouteInfoRequest, SyncRouteInfoResponse,
 };
 
 pub type PeerId = u32;
@@ -34,6 +34,9 @@ struct RouteGroupData {
     peer_conn_versions: HashMap<PeerId, Version>,
     my_info: RoutePeerInfo,
     my_info_version: Version,
+    /// Per-peer P2P connections reported via SyncRouteInfo conn_info.
+    /// Maps peer_id -> set of peer_ids it is directly connected to (excluding server).
+    peer_connections: HashMap<PeerId, BTreeSet<PeerId>>,
 }
 
 /// Route state manager.
@@ -113,6 +116,7 @@ impl RouteState {
                 peer_conn_versions: HashMap::new(),
                 my_info,
                 my_info_version: 1,
+                peer_connections: HashMap::new(),
             }
         })
     }
@@ -131,6 +135,11 @@ impl RouteState {
         g.peer_infos.remove(&peer_id);
         g.sessions.remove(&peer_id);
         g.peer_conn_versions.remove(&peer_id);
+        // Clean up P2P connections for this peer
+        g.peer_connections.remove(&peer_id);
+        for conns in g.peer_connections.values_mut() {
+            conns.remove(&peer_id);
+        }
         if was_present {
             Self::bump_all_conn_versions(g);
         }
@@ -211,6 +220,97 @@ impl RouteState {
         g.my_info_version += 1;
         g.my_info.version = g.my_info_version;
         Ok(())
+    }
+
+    /// Process conn_info from an incoming SyncRouteInfoRequest.
+    /// Extracts the sending peer's P2P connections and stores them so they
+    /// can be included in future conn_bitmap broadcasts.
+    /// Returns true if P2P connections were added/removed/changed.
+    pub fn update_peer_connections_from_conn_info(
+        &mut self,
+        group_key: &str,
+        from_peer_id: PeerId,
+        request_bytes: &[u8],
+    ) -> bool {
+        let req = match SyncRouteInfoRequest::decode(request_bytes) {
+            Ok(r) => r,
+            Err(e) => {
+                web_sys::console::warn_1(
+                    &format!("update_peer_connections: decode failed: {}", e).into(),
+                );
+                return false;
+            }
+        };
+
+        let g = self.ensure_group(group_key);
+
+        let p2p_connections: BTreeSet<PeerId> = match req.conn_info {
+            Some(crate::proto::peer_rpc::sync_route_info_request::ConnInfo::ConnBitmap(ref bitmap)) => {
+                web_sys::console::log_1(
+                    &format!("[P2P] from_peer={} conn_info=ConnBitmap peer_count={}", from_peer_id, bitmap.peer_ids.len()).into(),
+                );
+                // Find the row for from_peer_id in the bitmap
+                if let Some(peer_idx) = bitmap.peer_ids.iter().position(|p| p.peer_id == from_peer_id) {
+                    let all_connected = get_connected_peers_from_bitmap(bitmap, peer_idx);
+                    web_sys::console::log_1(
+                        &format!("[P2P] from_peer={} all_connected={:?}", from_peer_id, all_connected).into(),
+                    );
+                    all_connected
+                        .into_iter()
+                        .filter(|&p| p != MY_PEER_ID && p != from_peer_id && g.peers.contains(&p))
+                        .collect()
+                } else {
+                    web_sys::console::warn_1(
+                        &format!("[P2P] from_peer={} NOT FOUND in bitmap peer_ids", from_peer_id).into(),
+                    );
+                    BTreeSet::new()
+                }
+            }
+            Some(crate::proto::peer_rpc::sync_route_info_request::ConnInfo::ConnPeerList(ref list)) => {
+                web_sys::console::log_1(
+                    &format!("[P2P] from_peer={} conn_info=ConnPeerList entry_count={}", from_peer_id, list.peer_conn_infos.len()).into(),
+                );
+                // Find the entry for from_peer_id
+                list.peer_conn_infos
+                    .iter()
+                    .find(|info| info.peer_id.as_ref().map(|p| p.peer_id) == Some(from_peer_id))
+                    .map(|info| {
+                        info.connected_peer_ids
+                            .iter()
+                            .copied()
+                            .filter(|&p| p != MY_PEER_ID && p != from_peer_id && g.peers.contains(&p))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            }
+            None => {
+                web_sys::console::log_1(
+                    &format!("[P2P] from_peer={} conn_info=None, keeping existing connections", from_peer_id).into(),
+                );
+                // Don't remove existing P2P connections on heartbeat syncs
+                return false;
+            }
+        };
+
+        let changed = if p2p_connections.is_empty() {
+            g.peer_connections.remove(&from_peer_id).is_some()
+        } else {
+            let old = g.peer_connections.insert(from_peer_id, p2p_connections.clone());
+            old.map(|o| o != g.peer_connections[&from_peer_id]).unwrap_or(true)
+        };
+
+        if changed {
+            web_sys::console::log_1(
+                &format!("[P2P] from_peer={} p2p_connections={:?} CHANGED, bumping versions", from_peer_id, p2p_connections).into(),
+            );
+            Self::bump_all_conn_versions(g);
+        } else {
+            web_sys::console::log_1(
+                &format!("[P2P] from_peer={} p2p_connections={:?} unchanged", from_peer_id, p2p_connections).into(),
+            );
+        }
+
+        changed
     }
 
     /// Build a SyncRouteInfoRequest payload to send to target_peer_id.
@@ -432,6 +532,28 @@ impl RouteState {
                 set_bit(&mut bitmap, server_idx, i);
                 set_bit(&mut bitmap, i, server_idx);
             }
+
+            // Add peer-to-peer P2P edges from stored connections (bidirectional)
+            if !g.peer_connections.is_empty() {
+                web_sys::console::log_1(
+                    &format!("[P2P] build_conn_bitmap: peer_connections={:?} relevant_peers={:?}",
+                        g.peer_connections, relevant_peers).into(),
+                );
+            }
+            for (src_peer, dst_peers) in &g.peer_connections {
+                let Some(&src_idx) = idx_by_peer.get(src_peer) else {
+                    continue;
+                };
+                for dst_peer in dst_peers {
+                    let Some(&dst_idx) = idx_by_peer.get(dst_peer) else {
+                        continue;
+                    };
+                    if src_idx != dst_idx && src_idx != server_idx && dst_idx != server_idx {
+                        set_bit(&mut bitmap, src_idx, dst_idx);
+                        set_bit(&mut bitmap, dst_idx, src_idx);
+                    }
+                }
+            }
         } else {
             for i in 0..n {
                 for j in 0..n {
@@ -487,6 +609,26 @@ impl RouteState {
             bitmap,
         })
     }
+}
+
+/// Parse a RouteConnBitmap and extract the set of peer IDs connected to the peer at `peer_idx`.
+fn get_connected_peers_from_bitmap(
+    bitmap: &RouteConnBitmap,
+    peer_idx: usize,
+) -> BTreeSet<PeerId> {
+    let n = bitmap.peer_ids.len();
+    let mut connected = BTreeSet::new();
+    for (idx, pid_ver) in bitmap.peer_ids.iter().enumerate() {
+        let bit_idx = peer_idx * n + idx;
+        let byte_idx = bit_idx / 8;
+        let bit_offset = bit_idx % 8;
+        if byte_idx < bitmap.bitmap.len()
+            && (bitmap.bitmap[byte_idx] >> bit_offset) & 1 == 1
+        {
+            connected.insert(pid_ver.peer_id);
+        }
+    }
+    connected
 }
 
 fn make_stub_peer_info(peer_id: PeerId, network_length: u32) -> RoutePeerInfo {
