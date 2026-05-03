@@ -116,6 +116,7 @@ impl DurableObject for RelayRoom {
 
         let sockets = self.state.get_websockets();
         let mut alive_count = 0;
+        let mut group_keys: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
 
         for ws in &sockets {
             match ws.deserialize_attachment::<WsAttachment>() {
@@ -133,6 +134,9 @@ impl DurableObject for RelayRoom {
                         let _ = ws.close(Some(1001), Some("timeout"));
                         continue;
                     }
+                    if !att.group_key.is_empty() {
+                        group_keys.insert(att.group_key.clone());
+                    }
                 }
                 _ => {}
             }
@@ -142,6 +146,20 @@ impl DurableObject for RelayRoom {
         // Re-arm alarm if there are still websockets
         if alive_count > 0 {
             self.schedule_cleanup_alarm().await;
+
+            // Periodic route refresh: broadcast to all peers to keep their
+            // RoutePeerInfo.last_update fresh. Without this, clients will
+            // expire idle peers after REMOVE_DEAD_PEER_INFO_AFTER (~1 hour).
+            for group_key in &group_keys {
+                web_sys::console::log_1(
+                    &format!("[RelayRoom] alarm: periodic route refresh for group={}", group_key).into(),
+                );
+                if let Err(e) = self.broadcast_route_update(group_key, 0) {
+                    web_sys::console::error_1(
+                        &format!("[RelayRoom] alarm: broadcast failed: {:?}", e).into(),
+                    );
+                }
+            }
         }
 
         web_sys::console::log_1(&format!("[RelayRoom] alarm: {} sockets alive", alive_count).into());
