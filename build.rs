@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let proto_dir: PathBuf = ["..", "easytier", "src", "proto"].iter().collect();
-    let extra_proto_dir: PathBuf = ["..", "easytier-ws-relay", "protos"].iter().collect();
+    // let extra_proto_dir: PathBuf = ["..", "easytier-ws-relay", "protos"].iter().collect();
 
     let proto_files = [
         proto_dir.join("peer_rpc.proto"),
@@ -41,7 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     config.compile_protos(
         &proto_files,
-        &[proto_dir.as_path(), extra_proto_dir.as_path()],
+        &[proto_dir.as_path()],
     )?;
 
     Ok(())
