@@ -37,6 +37,9 @@ struct RouteGroupData {
     /// Per-peer P2P connections reported via SyncRouteInfo conn_info.
     /// Maps peer_id -> set of peer_ids it is directly connected to (excluding server).
     peer_connections: HashMap<PeerId, BTreeSet<PeerId>>,
+    /// Timestamp (ms) when each peer was last removed from g.peers.
+    /// Used to clean up stale peer_connections entries.
+    peer_removed_at: HashMap<PeerId, u64>,
 }
 
 /// Route state manager.
@@ -117,6 +120,7 @@ impl RouteState {
                 my_info,
                 my_info_version: 1,
                 peer_connections: HashMap::new(),
+                peer_removed_at: HashMap::new(),
             }
         })
     }
@@ -124,6 +128,8 @@ impl RouteState {
     pub fn add_peer(&mut self, group_key: &str, peer_id: PeerId) {
         let g = self.ensure_group(group_key);
         let is_new = g.peers.insert(peer_id);
+        // Peer is back online, clear removal timestamp
+        g.peer_removed_at.remove(&peer_id);
         if is_new {
             Self::bump_all_conn_versions(g);
         }
@@ -135,11 +141,11 @@ impl RouteState {
         g.peer_infos.remove(&peer_id);
         g.sessions.remove(&peer_id);
         g.peer_conn_versions.remove(&peer_id);
-        // Clean up P2P connections for this peer
-        g.peer_connections.remove(&peer_id);
-        for conns in g.peer_connections.values_mut() {
-            conns.remove(&peer_id);
-        }
+        // Record removal time for stale P2P cleanup.
+        // peer_connections is intentionally preserved across brief
+        // reconnections so P2P topology survives WebSocket flaps.
+        // Stale entries are cleaned up by cleanup_stale_peer_connections().
+        g.peer_removed_at.insert(peer_id, Self::now_ms());
         if was_present {
             Self::bump_all_conn_versions(g);
         }
@@ -481,6 +487,34 @@ impl RouteState {
         };
 
         Ok(prost::Message::encode_to_vec(&resp))
+    }
+
+    /// Clean up stale peer_connections entries for peers that have been
+    /// disconnected for longer than `stale_threshold_ms`. This prevents
+    /// unbounded memory growth from peers that leave permanently.
+    /// Mirrors official easytier's clear_expired_peer pattern.
+    pub fn cleanup_stale_peer_connections(&mut self, group_key: &str, stale_threshold_ms: u64) {
+        let g = self.ensure_group(group_key);
+        let now = Self::now_ms();
+        let mut stale_peers: Vec<PeerId> = Vec::new();
+        for (&peer_id, &removed_at) in &g.peer_removed_at {
+            if now.saturating_sub(removed_at) > stale_threshold_ms {
+                stale_peers.push(peer_id);
+            }
+        }
+        for peer_id in &stale_peers {
+            g.peer_connections.remove(peer_id);
+            g.peer_removed_at.remove(peer_id);
+            // Also remove this peer from other peers' connection sets
+            for conns in g.peer_connections.values_mut() {
+                conns.remove(peer_id);
+            }
+        }
+        if !stale_peers.is_empty() {
+            web_sys::console::log_1(
+                &format!("[P2P] cleanup_stale: removed {} stale peer_connections: {:?}", stale_peers.len(), stale_peers).into(),
+            );
+        }
     }
 
     // --- helpers ---

@@ -51,6 +51,11 @@ impl PeerManager {
         self.route_state.bump_my_info_version(group_key);
     }
 
+    /// Clean up stale peer_connections for peers disconnected > threshold.
+    pub fn cleanup_stale_peer_connections(&mut self, group_key: &str, stale_threshold_ms: u64) {
+        self.route_state.cleanup_stale_peer_connections(group_key, stale_threshold_ms);
+    }
+
     pub fn remove_peer(&mut self, ctx: &WsPeerContext) -> bool {
         let peer_id = ctx.peer_id;
         let group_key = &ctx.group_key;

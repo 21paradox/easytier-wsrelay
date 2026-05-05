@@ -147,6 +147,18 @@ impl DurableObject for RelayRoom {
         if alive_count > 0 {
             self.schedule_cleanup_alarm().await;
 
+            // Clean up stale P2P connections for peers disconnected > 10 min.
+            // Mirrors official easytier's clear_expired_peer pattern.
+            const STALE_P2P_THRESHOLD_MS: u64 = 600_000; // 10 minutes
+            for group_key in &group_keys {
+                peer_manager::with_global_state(|gs| {
+                    gs.peer_manager.cleanup_stale_peer_connections(
+                        group_key,
+                        STALE_P2P_THRESHOLD_MS,
+                    );
+                });
+            }
+
             // Periodic route refresh: broadcast to all peers to keep their
             // RoutePeerInfo.last_update fresh. Without this, clients will
             // expire idle peers after REMOVE_DEAD_PEER_INFO_AFTER (~1 hour).
