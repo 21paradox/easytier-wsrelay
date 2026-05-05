@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 use worker::*;
 
@@ -283,7 +285,7 @@ impl DurableObject for RelayRoom {
                         }
                     }
 
-                    // Push initial route update to the new peer
+                        // Push initial route update to the new peer
                     {
                         let ctx = attachment_to_ctx(&att);
                         let route_update = peer_manager::with_global_state(|gs| {
@@ -505,10 +507,28 @@ impl RelayRoom {
 
     /// Schedule a cleanup alarm if not already set.
     async fn schedule_cleanup_alarm(&self) {
-        let alarm = self.state.storage().get_alarm().await;
-        if alarm.ok().flatten().is_none() {
-            let schedule_time = Date::now().as_millis() as i64 + CLEANUP_INTERVAL_MS as i64;
-            let _ = self.state.storage().set_alarm(schedule_time).await;
+        match self.state.storage().get_alarm().await {
+            Ok(Some(existing)) => {
+                web_sys::console::log_1(
+                    &format!("[alarm] already scheduled at {:?}", existing).into(),
+                );
+            }
+            Ok(None) => {
+                web_sys::console::log_1(
+                    &format!("[alarm] scheduling in {}ms", CLEANUP_INTERVAL_MS).into(),
+                );
+                match self.state.storage().set_alarm(Duration::from_millis(CLEANUP_INTERVAL_MS)).await {
+                    Ok(()) => web_sys::console::log_1(&"[alarm] set_alarm succeeded".into()),
+                    Err(e) => web_sys::console::error_1(
+                        &format!("[alarm] set_alarm failed: {:?}", e).into(),
+                    ),
+                }
+            }
+            Err(e) => {
+                web_sys::console::error_1(
+                    &format!("[alarm] get_alarm failed: {:?}", e).into(),
+                );
+            }
         }
     }
 }
