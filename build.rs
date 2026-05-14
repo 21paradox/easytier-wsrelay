@@ -27,22 +27,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .type_attribute("peer_rpc.DirectConnectedPeerInfo", "#[derive(Hash)]")
         .type_attribute("peer_rpc.PeerInfoForGlobalMap", "#[derive(Hash)]")
         .type_attribute("peer_rpc.ForeignNetworkRouteInfoKey", "#[derive(Hash, Eq)]")
-        .type_attribute(
-            "peer_rpc.RouteForeignNetworkSummary.Info",
-            "#[derive(Hash, Eq)]",
-        )
-        .type_attribute(
-            "peer_rpc.RouteForeignNetworkSummary",
-            "#[derive(Hash, Eq)]",
-        )
+        .type_attribute("peer_rpc.RouteForeignNetworkSummary.Info", "#[derive(Hash, Eq)]")
+        .type_attribute("peer_rpc.RouteForeignNetworkSummary", "#[derive(Hash, Eq)]")
         .type_attribute("common.RpcDescriptor", "#[derive(Hash, Eq)]")
         .extern_path(".google.protobuf.Timestamp", "crate::proto::Timestamp")
         .btree_map(["."]);
 
-    config.compile_protos(
-        &proto_files,
-        &[proto_dir.as_path()],
-    )?;
+    config.compile_protos(&proto_files, &[proto_dir.as_path()])?;
 
     Ok(())
 }

@@ -25,7 +25,13 @@ pub fn handle_handshake(
     web_sys::console::log_1(&format!("[HS] handle_handshake payload_len={}", payload.len()).into());
     let req = match codec::decode_handshake_request(payload) {
         Ok(r) => {
-            web_sys::console::log_1(&format!("[HS] decoded: magic={} peer_id={} network_name={}", r.magic, r.my_peer_id, r.network_name).into());
+            web_sys::console::log_1(
+                &format!(
+                    "[HS] decoded: magic={} peer_id={} network_name={}",
+                    r.magic, r.my_peer_id, r.network_name
+                )
+                .into(),
+            );
             r
         }
         Err(e) => {
@@ -77,7 +83,12 @@ pub fn handle_handshake(
     };
 
     let resp_bytes = codec::encode_handshake_request(&resp_payload);
-    let resp_header = create_header(MY_PEER_ID, req.my_peer_id, PacketType::HandShake, resp_bytes.len() as u32);
+    let resp_header = create_header(
+        MY_PEER_ID,
+        req.my_peer_id,
+        PacketType::HandShake,
+        resp_bytes.len() as u32,
+    );
 
     let mut full_response = resp_header;
     full_response.extend_from_slice(&resp_bytes);
@@ -91,10 +102,7 @@ pub fn handle_handshake(
 }
 
 /// Handle a ping request. Returns the pong response bytes.
-pub fn handle_ping(
-    from_peer_id: PeerId,
-    payload: &[u8],
-) -> Vec<u8> {
+pub fn handle_ping(from_peer_id: PeerId, payload: &[u8]) -> Vec<u8> {
     let header = create_header(MY_PEER_ID, from_peer_id, PacketType::Pong, payload.len() as u32);
     let mut response = header;
     response.extend_from_slice(payload);

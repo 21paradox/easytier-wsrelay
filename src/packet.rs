@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::constants::{HEADER_SIZE, MY_PEER_ID, PacketType};
+use crate::constants::{PacketType, HEADER_SIZE, MY_PEER_ID};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PacketHeader {
@@ -53,12 +53,7 @@ pub fn parse_header(bytes: &[u8]) -> Option<PacketHeader> {
 }
 
 /// Create a 16-byte packet header.
-pub fn create_header(
-    from_peer_id: u32,
-    to_peer_id: u32,
-    packet_type: PacketType,
-    payload_len: u32,
-) -> Vec<u8> {
+pub fn create_header(from_peer_id: u32, to_peer_id: u32, packet_type: PacketType, payload_len: u32) -> Vec<u8> {
     PacketHeader {
         from_peer_id,
         to_peer_id,
@@ -72,10 +67,6 @@ pub fn create_header(
 }
 
 /// Create a header for server response (from MY_PEER_ID to target).
-pub fn create_server_header(
-    to_peer_id: u32,
-    packet_type: PacketType,
-    payload_len: u32,
-) -> Vec<u8> {
+pub fn create_server_header(to_peer_id: u32, packet_type: PacketType, payload_len: u32) -> Vec<u8> {
     create_header(MY_PEER_ID, to_peer_id, packet_type, payload_len)
 }

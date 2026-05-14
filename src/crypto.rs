@@ -1,4 +1,4 @@
-use crate::constants::{MY_PEER_ID, PacketType};
+use crate::constants::{PacketType, MY_PEER_ID};
 use crate::packet::create_header;
 use getrandom::getrandom;
 use wasm_bindgen::prelude::*;
@@ -81,7 +81,10 @@ pub fn siphash_1_3(msg: &[u8], k0: u64, k1: u64) -> u64 {
 /// Generate a digest of given length from two strings using SipHash-1-3.
 /// digest_len must be a multiple of 8.
 pub fn generate_digest_from_str(str1: &str, str2: &str, digest_len: usize) -> Vec<u8> {
-    assert!(digest_len > 0 && digest_len % 8 == 0, "digest_len must be multiple of 8");
+    assert!(
+        digest_len > 0 && digest_len % 8 == 0,
+        "digest_len must be multiple of 8"
+    );
 
     let mut hasher = SipHashHasher::new();
     hasher.write(str1.as_bytes());
@@ -214,8 +217,7 @@ fn get_crypto() -> SubtleCrypto {
 async fn import_aes_gcm_key(key_bytes: &[u8]) -> Result<CryptoKey, String> {
     let subtle = get_crypto();
     let key_obj = js_sys::Object::new();
-    js_sys::Reflect::set(&key_obj, &"name".into(), &"AES-GCM".into())
-        .map_err(|e| format!("set name: {:?}", e))?;
+    js_sys::Reflect::set(&key_obj, &"name".into(), &"AES-GCM".into()).map_err(|e| format!("set name: {:?}", e))?;
 
     let promise = subtle
         .import_key_with_object(
@@ -223,11 +225,16 @@ async fn import_aes_gcm_key(key_bytes: &[u8]) -> Result<CryptoKey, String> {
             &js_sys::Uint8Array::from(key_bytes),
             &key_obj,
             false,
-            &["encrypt", "decrypt"].iter().map(|s| JsValue::from(*s)).collect::<js_sys::Array>(),
+            &["encrypt", "decrypt"]
+                .iter()
+                .map(|s| JsValue::from(*s))
+                .collect::<js_sys::Array>(),
         )
         .map_err(|e| format!("import_key: {:?}", e))?;
 
-    let js_val = JsFuture::from(promise).await.map_err(|e| format!("import_key await: {:?}", e))?;
+    let js_val = JsFuture::from(promise)
+        .await
+        .map_err(|e| format!("import_key await: {:?}", e))?;
     Ok(js_val.unchecked_into())
 }
 
@@ -238,8 +245,7 @@ pub async fn encrypt_aes_gcm(payload: &[u8], key: &[u8]) -> Result<Vec<u8>, Stri
     let crypto_key = import_aes_gcm_key(key).await?;
 
     let algo = js_sys::Object::new();
-    js_sys::Reflect::set(&algo, &"name".into(), &"AES-GCM".into())
-        .map_err(|e| format!("set name: {:?}", e))?;
+    js_sys::Reflect::set(&algo, &"name".into(), &"AES-GCM".into()).map_err(|e| format!("set name: {:?}", e))?;
     js_sys::Reflect::set(&algo, &"iv".into(), &js_sys::Uint8Array::from(nonce.as_slice()))
         .map_err(|e| format!("set iv: {:?}", e))?;
     js_sys::Reflect::set(&algo, &"tagLength".into(), &JsValue::from(128))
@@ -275,19 +281,14 @@ pub async fn decrypt_aes_gcm(payload: &[u8], key: &[u8]) -> Result<Vec<u8>, Stri
     let crypto_key = import_aes_gcm_key(key).await?;
 
     let algo = js_sys::Object::new();
-    js_sys::Reflect::set(&algo, &"name".into(), &"AES-GCM".into())
-        .map_err(|e| format!("set name: {:?}", e))?;
+    js_sys::Reflect::set(&algo, &"name".into(), &"AES-GCM".into()).map_err(|e| format!("set name: {:?}", e))?;
     js_sys::Reflect::set(&algo, &"iv".into(), &js_sys::Uint8Array::from(nonce))
         .map_err(|e| format!("set iv: {:?}", e))?;
     js_sys::Reflect::set(&algo, &"tagLength".into(), &JsValue::from(128))
         .map_err(|e| format!("set tagLength: {:?}", e))?;
 
     let promise = subtle
-        .decrypt_with_object_and_buffer_source(
-            &algo,
-            &crypto_key,
-            &js_sys::Uint8Array::from(ciphertext_with_tag),
-        )
+        .decrypt_with_object_and_buffer_source(&algo, &crypto_key, &js_sys::Uint8Array::from(ciphertext_with_tag))
         .map_err(|e| format!("decrypt: {:?}", e))?;
 
     let result = JsFuture::from(promise)

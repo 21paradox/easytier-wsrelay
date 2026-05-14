@@ -2,8 +2,8 @@ use prost::Message;
 
 use crate::proto::common::{RpcPacket, RpcRequest, RpcResponse};
 use crate::proto::peer_rpc::{
-    GetGlobalPeerMapRequest, GetGlobalPeerMapResponse, HandshakeRequest, ReportPeersRequest,
-    ReportPeersResponse, RoutePeerInfo, SyncRouteInfoRequest, SyncRouteInfoResponse,
+    GetGlobalPeerMapRequest, GetGlobalPeerMapResponse, HandshakeRequest, ReportPeersRequest, ReportPeersResponse,
+    RoutePeerInfo, SyncRouteInfoRequest, SyncRouteInfoResponse,
 };
 
 // ---- Direct prost decode/encode (for pure Rust consumers) ----
@@ -56,4 +56,3 @@ prost_encode_fn!(encode_get_global_peer_map_response, GetGlobalPeerMapResponse);
 
 prost_decode_fn!(decode_route_peer_info, RoutePeerInfo);
 prost_encode_fn!(encode_route_peer_info, RoutePeerInfo);
-
