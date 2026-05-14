@@ -235,16 +235,16 @@ impl DurableObject for RelayRoom {
                     peer_manager::with_global_state(|gs| {
                         gs.peer_manager.add_peer(&outcome.group_key, outcome.peer_id);
 
-                        // Use the conn version (already bumped by add_peer) as the
-                        // seed version so it is monotonically increasing even across
-                        // reconnections. The peer's real SyncRouteInfo will update
-                        // this to the correct version shortly after.
-                        let seed_version = gs
-                            .peer_manager
-                            .get_peer_conn_version(&outcome.group_key, outcome.peer_id);
+                        // version: 1 is intentionally low so the local peer's
+                        // check_duplicate_peer_id (peer_ospf_route.rs:809)
+                        // won't panic when it receives its own stub info
+                        // (broadcast uses exclude_peer_id=0, so A gets its own
+                        // stub). The peer's real SyncRouteInfo will update this
+                        // to the correct version and trigger a broadcast to all
+                        // other peers (see Fix 1 in rpc_handler.rs).
                         let peer_info = crate::proto::peer_rpc::RoutePeerInfo {
                             peer_id: outcome.peer_id,
-                            version: seed_version,
+                            version: 1,
                             last_update: Some(crate::proto::Timestamp {
                                 seconds: (Date::now().as_millis() / 1000) as i64,
                                 nanos: 0,
