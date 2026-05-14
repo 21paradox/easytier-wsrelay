@@ -32,7 +32,15 @@ pub fn handle_rpc_req(
     peer_center_map: &mut std::collections::HashMap<String, PeerCenter>,
     payload: &[u8],
 ) -> Vec<RpcAction> {
-    web_sys::console::log_1(&format!("[RPC] handle_rpc_req payload_len={} peer_id={} group_key={}", payload.len(), ctx.peer_id, ctx.group_key).into());
+    web_sys::console::log_1(
+        &format!(
+            "[RPC] handle_rpc_req payload_len={} peer_id={} group_key={}",
+            payload.len(),
+            ctx.peer_id,
+            ctx.group_key
+        )
+        .into(),
+    );
     let rpc_packet = match codec::decode_rpc_packet(payload) {
         Ok(p) => p,
         Err(e) => {
@@ -40,11 +48,15 @@ pub fn handle_rpc_req(
             return vec![];
         }
     };
-    web_sys::console::log_1(&format!("[RPC] decoded rpc_packet: is_request={} service={:?} method={:?}",
-        rpc_packet.is_request,
-        rpc_packet.descriptor.as_ref().map(|d| d.service_name.as_str()),
-        rpc_packet.descriptor.as_ref().map(|d| d.method_index),
-    ).into());
+    web_sys::console::log_1(
+        &format!(
+            "[RPC] decoded rpc_packet: is_request={} service={:?} method={:?}",
+            rpc_packet.is_request,
+            rpc_packet.descriptor.as_ref().map(|d| d.service_name.as_str()),
+            rpc_packet.descriptor.as_ref().map(|d| d.method_index),
+        )
+        .into(),
+    );
 
     // Decompress body if needed
     let mut rpc_body = rpc_packet.body.clone();
@@ -63,16 +75,12 @@ pub fn handle_rpc_req(
     }
 
     let descriptor = rpc_packet.descriptor.as_ref();
-    let service_name = descriptor
-        .map(|d| d.service_name.as_str())
-        .unwrap_or("");
+    let service_name = descriptor.map(|d| d.service_name.as_str()).unwrap_or("");
 
     // --- PeerCenterRpc ---
     if service_name == "peer_rpc.PeerCenterRpc" || service_name == "PeerCenterRpc" {
         let group_key = ctx.group_key.clone();
-        let pc = peer_center_map
-            .entry(group_key.clone())
-            .or_insert_with(PeerCenter::new);
+        let pc = peer_center_map.entry(group_key.clone()).or_insert_with(PeerCenter::new);
 
         let method_index = descriptor.map(|d| d.method_index).unwrap_or(0);
         web_sys::console::log_1(&format!("[RPC] PeerCenterRpc method_index={}", method_index).into());
@@ -81,11 +89,7 @@ pub fn handle_rpc_req(
             // report_peers
             match pc.report_peers(&group_key, &inner_req_body) {
                 Ok(resp_bytes) => {
-                    let send_bytes = build_rpc_response_bytes(
-                        &rpc_packet,
-                        &resp_bytes,
-                        ctx.peer_id,
-                    );
+                    let send_bytes = build_rpc_response_bytes(&rpc_packet, &resp_bytes, ctx.peer_id);
                     return vec![RpcAction::SendTo {
                         peer_id: ctx.peer_id,
                         bytes: send_bytes,
@@ -102,28 +106,20 @@ pub fn handle_rpc_req(
             // get_global_peer_map
             match pc.get_global_peer_map(&group_key, &inner_req_body) {
                 Ok(resp_bytes) => {
-                    let send_bytes = build_rpc_response_bytes(
-                        &rpc_packet,
-                        &resp_bytes,
-                        ctx.peer_id,
-                    );
+                    let send_bytes = build_rpc_response_bytes(&rpc_packet, &resp_bytes, ctx.peer_id);
                     return vec![RpcAction::SendTo {
                         peer_id: ctx.peer_id,
                         bytes: send_bytes,
                     }];
                 }
                 Err(e) => {
-                    web_sys::console::error_1(
-                        &format!("PeerCenter get_global_peer_map failed: {}", e).into(),
-                    );
+                    web_sys::console::error_1(&format!("PeerCenter get_global_peer_map failed: {}", e).into());
                     return vec![];
                 }
             }
         }
 
-        web_sys::console::log_1(
-            &format!("Unhandled PeerCenterRpc methodIndex={}", method_index).into(),
-        );
+        web_sys::console::log_1(&format!("Unhandled PeerCenterRpc methodIndex={}", method_index).into());
         return vec![];
     }
 
@@ -131,29 +127,29 @@ pub fn handle_rpc_req(
     if service_name == "peer_rpc.OspfRouteRpc" || service_name == "OspfRouteRpc" {
         let group_key = ctx.group_key.clone();
         let method_index = descriptor.map(|d| d.method_index).unwrap_or(0);
-        web_sys::console::log_1(&format!("[RPC] OspfRouteRpc method_index={} group_key={}", method_index, group_key).into());
+        web_sys::console::log_1(
+            &format!(
+                "[RPC] OspfRouteRpc method_index={} group_key={}",
+                method_index, group_key
+            )
+            .into(),
+        );
 
         if method_index == 0 || method_index == 1 {
-            return handle_sync_route_info(
-                ctx,
-                peer_manager,
-                &rpc_packet,
-                &inner_req_body,
-                &group_key,
-            );
+            return handle_sync_route_info(ctx, peer_manager, &rpc_packet, &inner_req_body, &group_key);
         }
 
-        web_sys::console::log_1(
-            &format!("Unhandled OspfRouteRpc methodIndex={}", method_index).into(),
-        );
+        web_sys::console::log_1(&format!("Unhandled OspfRouteRpc methodIndex={}", method_index).into());
         return vec![];
     }
 
     web_sys::console::log_1(
-        &format!("Unhandled RPC Service: {} (proto: {})",
+        &format!(
+            "Unhandled RPC Service: {} (proto: {})",
             service_name,
             descriptor.map(|d| d.proto_name.as_str()).unwrap_or("")
-        ).into(),
+        )
+        .into(),
     );
     vec![]
 }
@@ -176,9 +172,7 @@ pub fn handle_rpc_resp(
     }
 
     let descriptor = rpc_packet.descriptor.as_ref();
-    let service_name = descriptor
-        .map(|d| d.service_name.as_str())
-        .unwrap_or("");
+    let service_name = descriptor.map(|d| d.service_name.as_str()).unwrap_or("");
 
     // Extract inner response body
     let mut service_resp_bytes = rpc_body.clone();
@@ -222,7 +216,15 @@ fn handle_sync_route_info(
     inner_req_body: &[u8],
     group_key: &str,
 ) -> Vec<RpcAction> {
-    web_sys::console::log_1(&format!("[RPC] handle_sync_route_info group_key={} peer_id={} body_len={}", group_key, ctx.peer_id, inner_req_body.len()).into());
+    web_sys::console::log_1(
+        &format!(
+            "[RPC] handle_sync_route_info group_key={} peer_id={} body_len={}",
+            group_key,
+            ctx.peer_id,
+            inner_req_body.len()
+        )
+        .into(),
+    );
     // Ensure server session ID
     if ctx.server_session_id.is_empty() {
         ctx.server_session_id = random_u64_string();
@@ -232,51 +234,59 @@ fn handle_sync_route_info(
 
     // Decode SyncRouteInfoRequest to check initiator flag
     if let Ok(sync_req) = codec::decode_sync_route_info_request(inner_req_body) {
-        web_sys::console::log_1(&format!("[RPC] SyncRouteInfoRequest decoded: is_initiator={} my_session_id={}", sync_req.is_initiator, sync_req.my_session_id).into());
+        web_sys::console::log_1(
+            &format!(
+                "[RPC] SyncRouteInfoRequest decoded: is_initiator={} my_session_id={}",
+                sync_req.is_initiator, sync_req.my_session_id
+            )
+            .into(),
+        );
         ctx.we_are_initiator = !sync_req.is_initiator;
 
         // Ack the session
-        peer_manager.on_route_session_ack(
-            group_key,
-            ctx.peer_id,
-            sync_req.my_session_id,
-            ctx.we_are_initiator,
-        );
+        peer_manager.on_route_session_ack(group_key, ctx.peer_id, sync_req.my_session_id, ctx.we_are_initiator);
 
-        // Process incoming peer infos
-        let has_new_peers = peer_manager.process_incoming_peer_infos(
-            group_key,
-            ctx.peer_id,
-            inner_req_body,
-        ).unwrap_or(false);
+        // Process incoming peer infos. has_peer_info_change is true when:
+        // - New peers were discovered, OR
+        // - Existing peer's version increased (e.g., reconnecting peer)
+        let has_peer_info_change = peer_manager
+            .process_incoming_peer_infos(group_key, ctx.peer_id, inner_req_body)
+            .unwrap_or(false);
 
         // Also process conn_info so P2P edges are propagated to other peers
-        p2p_changed = peer_manager.process_incoming_conn_info(
-            group_key,
-            ctx.peer_id,
-            inner_req_body,
-        );
+        p2p_changed = peer_manager.process_incoming_conn_info(group_key, ctx.peer_id, inner_req_body);
 
-        // If new peers were discovered from this sync, also broadcast to all peers
-        if has_new_peers && !p2p_changed {
+        // When peer info changed (new peers or version updates from reconnecting
+        // peers), broadcast to all other peers so they learn about the changes.
+        if has_peer_info_change && !p2p_changed {
             p2p_changed = true;
         }
     } else {
-        web_sys::console::warn_1(&format!("[RPC] decode_sync_route_info_request FAILED for inner_req_body len={}", inner_req_body.len()).into());
+        web_sys::console::warn_1(
+            &format!(
+                "[RPC] decode_sync_route_info_request FAILED for inner_req_body len={}",
+                inner_req_body.len()
+            )
+            .into(),
+        );
     }
 
     // Generate response
-    let resp_bytes = peer_manager.handle_sync_route_info(
-        group_key,
-        ctx.peer_id,
-        inner_req_body,
+    let resp_bytes = peer_manager.handle_sync_route_info(group_key, ctx.peer_id, inner_req_body);
+    web_sys::console::log_1(
+        &format!(
+            "[RPC] handle_sync_route_info_request returned resp={}",
+            resp_bytes.is_some()
+        )
+        .into(),
     );
-    web_sys::console::log_1(&format!("[RPC] handle_sync_route_info_request returned resp={}", resp_bytes.is_some()).into());
 
     // Build RPC response and send
     if let Some(resp) = resp_bytes {
         let send_bytes = build_rpc_response_bytes(rpc_packet, &resp, ctx.peer_id);
-        web_sys::console::log_1(&format!("[RPC] Sending RpcResp len={} to peer={}", send_bytes.len(), ctx.peer_id).into());
+        web_sys::console::log_1(
+            &format!("[RPC] Sending RpcResp len={} to peer={}", send_bytes.len(), ctx.peer_id).into(),
+        );
 
         let mut actions = vec![
             RpcAction::SendTo {
@@ -293,7 +303,11 @@ fn handle_sync_route_info(
         // learn about the new direct edges.
         if p2p_changed {
             web_sys::console::log_1(
-                &format!("[P2P] p2p_changed=true, adding BroadcastRouteUpdate for group={} exclude={}", group_key, ctx.peer_id).into(),
+                &format!(
+                    "[P2P] p2p_changed=true, adding BroadcastRouteUpdate for group={} exclude={}",
+                    group_key, ctx.peer_id
+                )
+                .into(),
             );
             actions.push(RpcAction::BroadcastRouteUpdate {
                 group_key: group_key.to_string(),
@@ -308,11 +322,7 @@ fn handle_sync_route_info(
 }
 
 /// Build a full RPC response packet (without outer packet header wrapping).
-pub fn build_rpc_response_bytes(
-    req_rpc_packet: &RpcPacket,
-    response_body: &[u8],
-    to_peer_id: u32,
-) -> Vec<u8> {
+pub fn build_rpc_response_bytes(req_rpc_packet: &RpcPacket, response_body: &[u8], to_peer_id: u32) -> Vec<u8> {
     // Compress if needed
     let mut body = response_body.to_vec();
     let compression_info = RpcCompressionInfo {

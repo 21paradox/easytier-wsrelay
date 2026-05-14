@@ -7,7 +7,7 @@ use crate::codec;
 use crate::constants::{PacketType, HEADER_SIZE, MY_PEER_ID};
 use crate::crypto::{random_u64_string, wrap_packet, WsCrypto};
 use crate::handlers;
-use crate::packet::{parse_header, create_header};
+use crate::packet::{create_header, parse_header};
 use crate::peer_manager::{self, WsPeerContext};
 use crate::rpc_handler::{self, RpcAction};
 
@@ -107,10 +107,7 @@ impl DurableObject for RelayRoom {
         // Schedule cleanup alarm if not already set
         self.schedule_cleanup_alarm().await;
 
-        Ok(ResponseBuilder::new()
-            .with_status(101)
-            .with_websocket(client)
-            .empty())
+        Ok(ResponseBuilder::new().with_status(101).with_websocket(client).empty())
     }
 
     async fn alarm(&self) -> Result<Response> {
@@ -154,10 +151,8 @@ impl DurableObject for RelayRoom {
             const STALE_P2P_THRESHOLD_MS: u64 = 600_000; // 10 minutes
             for group_key in &group_keys {
                 peer_manager::with_global_state(|gs| {
-                    gs.peer_manager.cleanup_stale_peer_connections(
-                        group_key,
-                        STALE_P2P_THRESHOLD_MS,
-                    );
+                    gs.peer_manager
+                        .cleanup_stale_peer_connections(group_key, STALE_P2P_THRESHOLD_MS);
                 });
             }
 
@@ -169,9 +164,7 @@ impl DurableObject for RelayRoom {
                     &format!("[RelayRoom] alarm: periodic route refresh for group={}", group_key).into(),
                 );
                 if let Err(e) = self.broadcast_route_update(group_key, 0) {
-                    web_sys::console::error_1(
-                        &format!("[RelayRoom] alarm: broadcast failed: {:?}", e).into(),
-                    );
+                    web_sys::console::error_1(&format!("[RelayRoom] alarm: broadcast failed: {:?}", e).into());
                 }
             }
         }
@@ -180,11 +173,7 @@ impl DurableObject for RelayRoom {
         Response::ok("ok")
     }
 
-    async fn websocket_message(
-        &self,
-        ws: WebSocket,
-        message: WebSocketIncomingMessage,
-    ) -> Result<()> {
+    async fn websocket_message(&self, ws: WebSocket, message: WebSocketIncomingMessage) -> Result<()> {
         let bytes = match message {
             WebSocketIncomingMessage::Binary(data) => data,
             WebSocketIncomingMessage::String(_) => {
@@ -231,10 +220,7 @@ impl DurableObject for RelayRoom {
                 web_sys::console::log_1(&format!("[ws] -> handleHandshake").into());
 
                 let outcome = peer_manager::with_global_state(|gs| {
-                    handlers::handle_handshake(
-                        payload,
-                        &mut gs.network_digest_registry,
-                    )
+                    handlers::handle_handshake(payload, &mut gs.network_digest_registry)
                 });
 
                 if let Some(outcome) = outcome {
@@ -249,55 +235,71 @@ impl DurableObject for RelayRoom {
                     peer_manager::with_global_state(|gs| {
                         gs.peer_manager.add_peer(&outcome.group_key, outcome.peer_id);
 
+                        // Use the conn version (already bumped by add_peer) as the
+                        // seed version so it is monotonically increasing even across
+                        // reconnections. The peer's real SyncRouteInfo will update
+                        // this to the correct version shortly after.
+                        let seed_version = gs
+                            .peer_manager
+                            .get_peer_conn_version(&outcome.group_key, outcome.peer_id);
                         let peer_info = crate::proto::peer_rpc::RoutePeerInfo {
                             peer_id: outcome.peer_id,
-                            version: 1,
+                            version: seed_version,
                             last_update: Some(crate::proto::Timestamp {
                                 seconds: (Date::now().as_millis() / 1000) as i64,
                                 nanos: 0,
                             }),
                             inst_id: Some(crate::proto::common::Uuid {
-                                part1: 0, part2: 0, part3: 0, part4: 0,
+                                part1: 0,
+                                part2: 0,
+                                part3: 0,
+                                part4: 0,
                             }),
                             network_length: 24,
                             ..Default::default()
                         };
                         let peer_info_bytes = codec::encode_route_peer_info(&peer_info);
-                        gs.peer_manager.update_peer_info(
-                            &outcome.group_key,
-                            outcome.peer_id,
-                            &peer_info_bytes,
-                        );
+                        gs.peer_manager
+                            .update_peer_info(&outcome.group_key, outcome.peer_id, &peer_info_bytes);
                         gs.peer_manager.route_state.bump_my_info_version(&outcome.group_key);
                     });
 
                     // Send handshake response
                     ws.send_with_bytes(&outcome.response_bytes)?;
 
-                    // Broadcast route update to all other peers in the same group
-                    {
-                        let group_key = outcome.group_key.clone();
-                        let peer_id = outcome.peer_id;
-                        if let Err(e) = self.broadcast_route_update(&group_key, peer_id) {
-                            web_sys::console::error_1(
-                                &format!("Broadcast after handshake failed for {}: {:?}", peer_id, e).into(),
-                            );
-                        }
-                    }
+                    //Broadcast route update to all other peers in the same group
+                    // {
+                    //     let group_key = outcome.group_key.clone();
+                    //     let peer_id = outcome.peer_id;
+                    //     if let Err(e) = self.broadcast_route_update(&group_key, peer_id) {
+                    //         web_sys::console::error_1(
+                    //             &format!("Broadcast after handshake failed for {}: {:?}", peer_id, e).into(),
+                    //         );
+                    //     }
+                    // }
 
-                        // Push initial route update to the new peer
+                    // Push initial route update to the new peer
                     {
                         let ctx = attachment_to_ctx(&att);
                         let route_update = peer_manager::with_global_state(|gs| {
                             gs.peer_manager.build_route_update(&ctx, att.peer_id, true)
                         });
                         if let Some(rpc_bytes) = route_update {
-                            web_sys::console::log_1(&format!("[ws] HandShake -> pushing initial route update to peer={}", att.peer_id).into());
-                            let crypto = WsCrypto::default();
-                            match wrap_packet(MY_PEER_ID, att.peer_id, PacketType::RpcReq, &rpc_bytes, &crypto).await {
-                                Ok(packet) => { ws.send_with_bytes(&packet)?; }
-                                Err(e) => { web_sys::console::error_1(&format!("initial route update wrap_packet failed: {}", e).into()); }
-                            }
+                            // The new peer will also receive the route update via the
+                            // broadcast below (exclude_peer_id=0 includes everyone).
+                            // The unused rpc_bytes is kept for potential future use
+                            // (e.g., sending a direct initial push before broadcast).
+                            let _ = rpc_bytes;
+                        }
+
+                        // Always broadcast route update to ALL peers when a peer
+                        // joins (or reconnects). This must NOT be conditional on
+                        // build_route_update succeeding for the new peer.
+                        let group_key = outcome.group_key.clone();
+                        if let Err(e) = self.broadcast_route_update(&group_key, 0) {
+                            web_sys::console::error_1(
+                                &format!("Broadcast after handshake failed for group={}: {:?}", group_key, e).into(),
+                            );
                         }
                     }
                 } else {
@@ -327,35 +329,66 @@ impl DurableObject for RelayRoom {
                     });
 
                     if actions.is_empty() {
-                        web_sys::console::warn_1(&format!("[ws] RpcReq -> handle_rpc_req returned no action (peer_id={} group_key={})", att.peer_id, att.group_key).into());
+                        web_sys::console::warn_1(
+                            &format!(
+                                "[ws] RpcReq -> handle_rpc_req returned no action (peer_id={} group_key={})",
+                                att.peer_id, att.group_key
+                            )
+                            .into(),
+                        );
                     }
 
                     for action in actions {
                         match action {
                             RpcAction::SendTo { peer_id: _, bytes } => {
-                                web_sys::console::log_1(&format!("[ws] RpcReq -> sending RpcResp len={}", bytes.len()).into());
+                                web_sys::console::log_1(
+                                    &format!("[ws] RpcReq -> sending RpcResp len={}", bytes.len()).into(),
+                                );
                                 let crypto = WsCrypto::default();
                                 match wrap_packet(MY_PEER_ID, att.peer_id, PacketType::RpcResp, &bytes, &crypto).await {
-                                    Ok(packet) => { ws.send_with_bytes(&packet)?; }
-                                    Err(e) => { web_sys::console::error_1(&format!("wrap_packet failed: {}", e).into()); }
+                                    Ok(packet) => {
+                                        ws.send_with_bytes(&packet)?;
+                                    }
+                                    Err(e) => {
+                                        web_sys::console::error_1(&format!("wrap_packet failed: {}", e).into());
+                                    }
                                 }
                             }
                             RpcAction::PushRouteUpdate { peer_id, group_key: _ } => {
-                                web_sys::console::log_1(&format!("[ws] RpcReq -> pushing route update to peer={}", peer_id).into());
+                                web_sys::console::log_1(
+                                    &format!("[ws] RpcReq -> pushing route update to peer={}", peer_id).into(),
+                                );
                                 let route_update = peer_manager::with_global_state(|gs| {
                                     let ctx = attachment_to_ctx(&att);
                                     gs.peer_manager.build_route_update(&ctx, peer_id, true)
                                 });
                                 if let Some(rpc_bytes) = route_update {
                                     let crypto = WsCrypto::default();
-                                    match wrap_packet(MY_PEER_ID, peer_id, PacketType::RpcReq, &rpc_bytes, &crypto).await {
-                                        Ok(packet) => { ws.send_with_bytes(&packet)?; }
-                                        Err(e) => { web_sys::console::error_1(&format!("pushRouteUpdate wrap_packet failed: {}", e).into()); }
+                                    match wrap_packet(MY_PEER_ID, peer_id, PacketType::RpcReq, &rpc_bytes, &crypto)
+                                        .await
+                                    {
+                                        Ok(packet) => {
+                                            ws.send_with_bytes(&packet)?;
+                                        }
+                                        Err(e) => {
+                                            web_sys::console::error_1(
+                                                &format!("pushRouteUpdate wrap_packet failed: {}", e).into(),
+                                            );
+                                        }
                                     }
                                 }
                             }
-                            RpcAction::BroadcastRouteUpdate { group_key, exclude_peer_id } => {
-                                web_sys::console::log_1(&format!("[ws] RpcReq -> broadcasting route update to group={} exclude={}", group_key, exclude_peer_id).into());
+                            RpcAction::BroadcastRouteUpdate {
+                                group_key,
+                                exclude_peer_id,
+                            } => {
+                                web_sys::console::log_1(
+                                    &format!(
+                                        "[ws] RpcReq -> broadcasting route update to group={} exclude={}",
+                                        group_key, exclude_peer_id
+                                    )
+                                    .into(),
+                                );
                                 if let Err(e) = self.broadcast_route_update(&group_key, exclude_peer_id) {
                                     web_sys::console::error_1(&format!("broadcastRouteUpdate failed: {:?}", e).into());
                                 }
@@ -375,12 +408,7 @@ impl DurableObject for RelayRoom {
                     let ctx = attachment_to_ctx(&att);
                     let mut ctx_mut = ctx.clone();
                     let _action = peer_manager::with_global_state(|gs| {
-                        rpc_handler::handle_rpc_resp(
-                            &mut ctx_mut,
-                            &mut gs.peer_manager,
-                            header.from_peer_id,
-                            payload,
-                        )
+                        rpc_handler::handle_rpc_resp(&mut ctx_mut, &mut gs.peer_manager, header.from_peer_id, payload)
                     });
                 } else {
                     // Forward
@@ -399,34 +427,67 @@ impl DurableObject for RelayRoom {
         Ok(())
     }
 
-    async fn websocket_close(
-        &self,
-        ws: WebSocket,
-        _code: usize,
-        _reason: String,
-        _was_clean: bool,
-    ) -> Result<()> {
+    async fn websocket_close(&self, ws: WebSocket, _code: usize, _reason: String, _was_clean: bool) -> Result<()> {
         if let Ok(Some(att)) = ws.deserialize_attachment::<WsAttachment>() {
             if att.peer_id != 0 {
-                let ctx = attachment_to_ctx(&att);
-                peer_manager::with_global_state(|gs| {
-                    gs.peer_manager.remove_peer(&ctx);
+                // Check if this peer_id has another active WebSocket before removing.
+                // Prevents a race where the old WS close event arrives AFTER a new WS
+                // handshake for the same peer has already completed.
+                let has_other_connection = self.state.get_websockets().iter().any(|other_ws| {
+                    if let Ok(Some(other_att)) = other_ws.deserialize_attachment::<WsAttachment>() {
+                        other_att.peer_id == att.peer_id && !std::ptr::eq(&ws, other_ws)
+                    } else {
+                        false
+                    }
                 });
-                self.broadcast_route_update(&att.group_key, att.peer_id)?;
+
+                if has_other_connection {
+                    web_sys::console::log_1(
+                        &format!(
+                            "[ws] close: peer={} still has another active connection, skipping remove_peer",
+                            att.peer_id
+                        )
+                        .into(),
+                    );
+                } else {
+                    let ctx = attachment_to_ctx(&att);
+                    peer_manager::with_global_state(|gs| {
+                        gs.peer_manager.remove_peer(&ctx);
+                    });
+                    self.broadcast_route_update(&att.group_key, att.peer_id)?;
+                }
             }
         }
         Ok(())
     }
 
     async fn websocket_error(&self, ws: WebSocket, _error: Error) -> Result<()> {
-        // Delegate to close handling
+        // Same race-condition protection as websocket_close
         if let Ok(Some(att)) = ws.deserialize_attachment::<WsAttachment>() {
             if att.peer_id != 0 {
-                let ctx = attachment_to_ctx(&att);
-                peer_manager::with_global_state(|gs| {
-                    gs.peer_manager.remove_peer(&ctx);
+                let has_other_connection = self.state.get_websockets().iter().any(|other_ws| {
+                    if let Ok(Some(other_att)) = other_ws.deserialize_attachment::<WsAttachment>() {
+                        other_att.peer_id == att.peer_id && !std::ptr::eq(&ws, other_ws)
+                    } else {
+                        false
+                    }
                 });
-                self.broadcast_route_update(&att.group_key, att.peer_id)?;
+
+                if has_other_connection {
+                    web_sys::console::log_1(
+                        &format!(
+                            "[ws] error: peer={} still has another active connection, skipping remove_peer",
+                            att.peer_id
+                        )
+                        .into(),
+                    );
+                } else {
+                    let ctx = attachment_to_ctx(&att);
+                    peer_manager::with_global_state(|gs| {
+                        gs.peer_manager.remove_peer(&ctx);
+                    });
+                    self.broadcast_route_update(&att.group_key, att.peer_id)?;
+                }
             }
         }
         Ok(())
@@ -468,11 +529,7 @@ impl RelayRoom {
     }
 
     /// Broadcast a route update to all peers in the same group.
-    fn broadcast_route_update(
-        &self,
-        group_key: &str,
-        exclude_peer_id: u32,
-    ) -> Result<()> {
+    fn broadcast_route_update(&self, group_key: &str, exclude_peer_id: u32) -> Result<()> {
         let sockets = self.state.get_websockets();
 
         for ws in &sockets {
@@ -485,18 +542,15 @@ impl RelayRoom {
                 }
 
                 let ctx = attachment_to_ctx(&att);
-                let route_update = peer_manager::with_global_state(|gs| {
-                    gs.peer_manager.build_route_update(&ctx, att.peer_id, true)
-                });
+                let route_update =
+                    peer_manager::with_global_state(|gs| gs.peer_manager.build_route_update(&ctx, att.peer_id, true));
 
                 if let Some(rpc_bytes) = route_update {
                     let header = create_header(MY_PEER_ID, att.peer_id, PacketType::RpcReq, rpc_bytes.len() as u32);
                     let mut packet = header;
                     packet.extend_from_slice(&rpc_bytes);
                     if let Err(e) = ws.send_with_bytes(&packet) {
-                        web_sys::console::error_1(
-                            &format!("broadcastRouteUpdate send failed: {:?}", e).into(),
-                        );
+                        web_sys::console::error_1(&format!("broadcastRouteUpdate send failed: {:?}", e).into());
                     }
                 }
             }
@@ -509,25 +563,22 @@ impl RelayRoom {
     async fn schedule_cleanup_alarm(&self) {
         match self.state.storage().get_alarm().await {
             Ok(Some(existing)) => {
-                web_sys::console::log_1(
-                    &format!("[alarm] already scheduled at {:?}", existing).into(),
-                );
+                web_sys::console::log_1(&format!("[alarm] already scheduled at {:?}", existing).into());
             }
             Ok(None) => {
-                web_sys::console::log_1(
-                    &format!("[alarm] scheduling in {}ms", CLEANUP_INTERVAL_MS).into(),
-                );
-                match self.state.storage().set_alarm(Duration::from_millis(CLEANUP_INTERVAL_MS)).await {
+                web_sys::console::log_1(&format!("[alarm] scheduling in {}ms", CLEANUP_INTERVAL_MS).into());
+                match self
+                    .state
+                    .storage()
+                    .set_alarm(Duration::from_millis(CLEANUP_INTERVAL_MS))
+                    .await
+                {
                     Ok(()) => web_sys::console::log_1(&"[alarm] set_alarm succeeded".into()),
-                    Err(e) => web_sys::console::error_1(
-                        &format!("[alarm] set_alarm failed: {:?}", e).into(),
-                    ),
+                    Err(e) => web_sys::console::error_1(&format!("[alarm] set_alarm failed: {:?}", e).into()),
                 }
             }
             Err(e) => {
-                web_sys::console::error_1(
-                    &format!("[alarm] get_alarm failed: {:?}", e).into(),
-                );
+                web_sys::console::error_1(&format!("[alarm] get_alarm failed: {:?}", e).into());
             }
         }
     }

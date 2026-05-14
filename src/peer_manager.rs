@@ -53,7 +53,8 @@ impl PeerManager {
 
     /// Clean up stale peer_connections for peers disconnected > threshold.
     pub fn cleanup_stale_peer_connections(&mut self, group_key: &str, stale_threshold_ms: u64) {
-        self.route_state.cleanup_stale_peer_connections(group_key, stale_threshold_ms);
+        self.route_state
+            .cleanup_stale_peer_connections(group_key, stale_threshold_ms);
     }
 
     pub fn remove_peer(&mut self, ctx: &WsPeerContext) -> bool {
@@ -70,17 +71,23 @@ impl PeerManager {
         self.route_state.get_peer_ids_in_group(group_key)
     }
 
-    pub fn update_peer_info(
-        &mut self,
-        group_key: &str,
-        peer_id: u32,
-        info_bytes: &[u8],
-    ) {
-        if let Err(e) = self.route_state.update_peer_info(group_key, peer_id, info_bytes) {
-            web_sys::console::warn_1(
-                &format!("updatePeerInfo error: {}", e).into(),
-            );
+    /// Update peer info from bytes. Returns true if the info actually changed
+    /// (new peer or version increased).
+    pub fn update_peer_info(&mut self, group_key: &str, peer_id: u32, info_bytes: &[u8]) -> bool {
+        match self.route_state.update_peer_info(group_key, peer_id, info_bytes) {
+            Ok(changed) => changed,
+            Err(e) => {
+                web_sys::console::warn_1(&format!("updatePeerInfo error: {}", e).into());
+                false
+            }
         }
+    }
+
+    /// Get the current conn version for a peer (after bump_all_conn_versions).
+    /// Used to seed RoutePeerInfo.version for a reconnecting peer so the
+    /// version is monotonically increasing.
+    pub fn get_peer_conn_version(&self, group_key: &str, peer_id: u32) -> u32 {
+        self.route_state.get_peer_conn_version(group_key, peer_id)
     }
 
     pub fn on_route_session_ack(
@@ -125,10 +132,7 @@ impl PeerManager {
         let rpc_request_bytes = codec::encode_rpc_request(&rpc_request);
 
         // Build transaction ID
-        let transaction_id: u32 = random_u64_string()
-            .parse::<u64>()
-            .unwrap_or(0)
-            .wrapping_mul(1) as u32;
+        let transaction_id: u32 = random_u64_string().parse::<u64>().unwrap_or(0).wrapping_mul(1) as u32;
 
         // Build RpcPacket
         let rpc_packet = RpcPacket {
@@ -171,50 +175,40 @@ impl PeerManager {
     /// Updates the route_state's peer_connections map so P2P edges
     /// can be included in future conn_bitmap broadcasts.
     /// Returns true if P2P connections were added/removed.
-    pub fn process_incoming_conn_info(
-        &mut self,
-        group_key: &str,
-        from_peer_id: u32,
-        request_bytes: &[u8],
-    ) -> bool {
+    pub fn process_incoming_conn_info(&mut self, group_key: &str, from_peer_id: u32, request_bytes: &[u8]) -> bool {
         self.route_state
             .update_peer_connections_from_conn_info(group_key, from_peer_id, request_bytes)
     }
 
     /// Process peer infos from an incoming SyncRouteInfo request.
     /// Updates local peer info store and returns whether new peers were discovered.
+    /// Process incoming peer infos from a SyncRouteInfoRequest.
+    /// Returns true if any peer info actually changed (new peer OR version bump).
     pub fn process_incoming_peer_infos(
         &mut self,
         group_key: &str,
         from_peer_id: u32,
         request_bytes: &[u8],
     ) -> Result<bool, String> {
-        let req = SyncRouteInfoRequest::decode(request_bytes)
-            .map_err(|e| format!("decode SyncRouteInfoRequest: {}", e))?;
+        let req =
+            SyncRouteInfoRequest::decode(request_bytes).map_err(|e| format!("decode SyncRouteInfoRequest: {}", e))?;
 
-        let mut has_new = false;
+        let mut has_change = false;
         if let Some(infos) = &req.peer_infos {
             for info in &infos.items {
                 if info.peer_id != MY_PEER_ID {
-                    let existing = self.route_state.get_peer_ids_in_group(group_key);
-                    let is_new = !existing.contains(&info.peer_id);
                     let info_bytes = codec::encode_route_peer_info(info);
-                    self.route_state
-                        .update_peer_info(group_key, info.peer_id, &info_bytes)
-                        .ok();
-                    if is_new {
-                        has_new = true;
+                    if self.update_peer_info(group_key, info.peer_id, &info_bytes) {
+                        has_change = true;
                     }
                 } else {
                     let info_bytes = codec::encode_route_peer_info(info);
-                    self.route_state
-                        .update_peer_info(group_key, info.peer_id, &info_bytes)
-                        .ok();
+                    self.update_peer_info(group_key, info.peer_id, &info_bytes);
                 }
             }
         }
 
-        Ok(has_new)
+        Ok(has_change)
     }
 }
 
