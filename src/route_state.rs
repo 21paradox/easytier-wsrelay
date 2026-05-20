@@ -540,6 +540,54 @@ impl RouteState {
         }
     }
 
+    /// Defensive cleanup: remove peer_infos entries for peers that have been
+    /// disconnected for longer than the threshold. This prevents stale peer info
+    /// from lingering if remove_peer was somehow skipped (e.g., lost websocket
+    /// close event). Peers without a removal record are cleaned up immediately
+    /// (they should have been handled by remove_peer).
+    pub fn cleanup_stale_peer_infos(
+        &mut self,
+        group_key: &str,
+        stale_threshold_ms: u64,
+    ) {
+        let g = self.ensure_group(group_key);
+        let now = Self::now_ms();
+        let mut to_remove: Vec<PeerId> = Vec::new();
+        for &peer_id in g.peer_infos.keys() {
+            if peer_id == MY_PEER_ID || g.peers.contains(&peer_id) {
+                continue;
+            }
+            // Check if this peer has a removal timestamp.
+            if let Some(&removed_at) = g.peer_removed_at.get(&peer_id) {
+                if now.saturating_sub(removed_at) > stale_threshold_ms {
+                    to_remove.push(peer_id);
+                }
+            } else {
+                // No removal record means remove_peer was never called
+                // (abnormal path, e.g. lost websocket close). Remove immediately.
+                to_remove.push(peer_id);
+            }
+        }
+        for peer_id in &to_remove {
+            g.peer_infos.remove(peer_id);
+            g.peer_conn_versions.remove(peer_id);
+            g.sessions.remove(peer_id);
+            g.peer_removed_at.remove(peer_id);
+        }
+        if !to_remove.is_empty() {
+            web_sys::console::log_1(
+                &format!(
+                    "[cleanup] removed {} stale peer_infos (disconnected > {}s): {:?}",
+                    to_remove.len(),
+                    stale_threshold_ms / 1000,
+                    to_remove
+                )
+                .into(),
+            );
+            Self::bump_all_conn_versions(g);
+        }
+    }
+
     // --- helpers ---
 
     fn bump_all_conn_versions(g: &mut RouteGroupData) {

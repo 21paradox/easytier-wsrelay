@@ -156,6 +156,18 @@ impl DurableObject for RelayRoom {
                 });
             }
 
+            // Defensive cleanup: remove peer_infos for peers disconnected longer
+            // than 5 minutes. Prevents stale data from accumulating if
+            // websocket_close events were lost (e.g., network partition).
+            const STALE_PEER_INFO_THRESHOLD_MS: u64 = 300_000;
+            for group_key in &group_keys {
+                peer_manager::with_global_state(|gs| {
+                    gs.peer_manager
+                        .route_state
+                        .cleanup_stale_peer_infos(group_key, STALE_PEER_INFO_THRESHOLD_MS);
+                });
+            }
+
             // Periodic route refresh: broadcast to all peers to keep their
             // RoutePeerInfo.last_update fresh. Without this, clients will
             // expire idle peers after REMOVE_DEAD_PEER_INFO_AFTER (~1 hour).
@@ -433,13 +445,20 @@ impl DurableObject for RelayRoom {
                 // Check if this peer_id has another active WebSocket before removing.
                 // Prevents a race where the old WS close event arrives AFTER a new WS
                 // handshake for the same peer has already completed.
-                let has_other_connection = self.state.get_websockets().iter().any(|other_ws| {
-                    if let Ok(Some(other_att)) = other_ws.deserialize_attachment::<WsAttachment>() {
-                        other_att.peer_id == att.peer_id && !std::ptr::eq(&ws, other_ws)
-                    } else {
-                        false
-                    }
-                });
+                // Uses server_session_id (unique per WebSocket) to identify different
+                // connections, because std::ptr::eq cannot compare across stack/list refs.
+                let ssid = &att.server_session_id;
+                let has_other_connection =
+                    self.state.get_websockets().iter().any(|other_ws| {
+                        if let Ok(Some(other_att)) =
+                            other_ws.deserialize_attachment::<WsAttachment>()
+                        {
+                            other_att.peer_id == att.peer_id
+                                && other_att.server_session_id != *ssid
+                        } else {
+                            false
+                        }
+                    });
 
                 if has_other_connection {
                     web_sys::console::log_1(
@@ -462,16 +481,21 @@ impl DurableObject for RelayRoom {
     }
 
     async fn websocket_error(&self, ws: WebSocket, _error: Error) -> Result<()> {
-        // Same race-condition protection as websocket_close
+        // Same race-condition protection as websocket_close, using server_session_id
         if let Ok(Some(att)) = ws.deserialize_attachment::<WsAttachment>() {
             if att.peer_id != 0 {
-                let has_other_connection = self.state.get_websockets().iter().any(|other_ws| {
-                    if let Ok(Some(other_att)) = other_ws.deserialize_attachment::<WsAttachment>() {
-                        other_att.peer_id == att.peer_id && !std::ptr::eq(&ws, other_ws)
-                    } else {
-                        false
-                    }
-                });
+                let ssid = &att.server_session_id;
+                let has_other_connection =
+                    self.state.get_websockets().iter().any(|other_ws| {
+                        if let Ok(Some(other_att)) =
+                            other_ws.deserialize_attachment::<WsAttachment>()
+                        {
+                            other_att.peer_id == att.peer_id
+                                && other_att.server_session_id != *ssid
+                        } else {
+                            false
+                        }
+                    });
 
                 if has_other_connection {
                     web_sys::console::log_1(
