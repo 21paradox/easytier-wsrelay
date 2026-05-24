@@ -156,17 +156,6 @@ impl DurableObject for RelayRoom {
                 });
             }
 
-            // Defensive cleanup: remove peer_infos for peers disconnected longer
-            // than 5 minutes. Prevents stale data from accumulating if
-            // websocket_close events were lost (e.g., network partition).
-            const STALE_PEER_INFO_THRESHOLD_MS: u64 = 300_000;
-            for group_key in &group_keys {
-                peer_manager::with_global_state(|gs| {
-                    gs.peer_manager
-                        .route_state
-                        .cleanup_stale_peer_infos(group_key, STALE_PEER_INFO_THRESHOLD_MS);
-                });
-            }
 
             // Periodic route refresh: broadcast to all peers to keep their
             // RoutePeerInfo.last_update fresh. Without this, clients will
